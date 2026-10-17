@@ -34,8 +34,16 @@ void main()
     uint c4 = p.c >> 2;
     if (id >= c4 * p.oh * p.ow * max(p.n, 1u)) return;
     uint ch = id % c4, px = id / c4;
-    uint ox = px % p.ow, oyg = px / p.ow;
-    uint img = oyg / p.oh, oy = oyg - img * p.oh, ibase = img * p.ih;
+    uint ox = px % p.ow, oy, ibase;
+    if (p.n <= 1u) {
+        oy = px / p.ow;
+        ibase = 0u;
+    } else {
+        uint oyg = px / p.ow;
+        uint img = oyg / p.oh;
+        oy = oyg - img * p.oh;
+        ibase = img * p.ih;
+    }
     bool refl = (p.flags & 2u) != 0u;
     vec4 acc = ((p.flags & 1u) != 0u) ? b[ch] : vec4(0.0);
     for (uint ky = 0u; ky < p.kh; ky++)

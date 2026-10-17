@@ -34,8 +34,16 @@ void main()
     uint id = gl_GlobalInvocationID.x;
     if (id >= p.c * p.oh * p.ow * max(p.n, 1u)) return;
     uint ch = id % p.c, px = id / p.c;
-    uint ox = px % p.ow, oyg = px / p.ow;
-    uint img = oyg / p.oh, oy = oyg - img * p.oh, ibase = img * p.ih;
+    uint ox = px % p.ow, oy, ibase;
+    if (p.n <= 1u) {
+        oy = px / p.ow;
+        ibase = 0u;
+    } else {
+        uint oyg = px / p.ow;
+        uint img = oyg / p.oh;
+        oy = oyg - img * p.oh;
+        ibase = img * p.ih;
+    }
     bool refl = (p.flags & 2u) != 0u;
     float acc = ((p.flags & 1u) != 0u) ? b[ch] : 0.0;
     for (uint ky = 0u; ky < p.kh; ky++)
