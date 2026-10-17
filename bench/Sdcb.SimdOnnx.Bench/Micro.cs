@@ -192,6 +192,15 @@ internal static class Micro
                     Console.WriteLine($"{engine,-7} setup {setup,7:F1} ms  median {times[times.Count / 2],8:F2} ms  min {times[0],8:F2} ms  " +
                         $"max|d| {maxd:E2} mean|d| {sum / want.Length:E2} psnr-vs-ref {psnr:F1} dB  peakWS {Process.GetCurrentProcess().PeakWorkingSet64 / 1048576} MB");
                     s.Dispose();
+                    if (EngineProfile.Enabled && engine == "cpu")
+                    {
+                        // GCDRNET_PROF=1: per-op / per-conv-class ms per run over the timed runs (+ the first)
+                        foreach (var (k, v) in EngineProfile.Operators().OrderByDescending(kv => kv.Value.Ms))
+                            Console.WriteLine($"    {k,-22} {v.Ms / (iters + 1),8:F2} ms  x{v.Calls / (iters + 1)}");
+                        foreach (var (k, v) in EngineProfile.ConvClasses().OrderByDescending(kv => kv.Value.Ms))
+                            Console.WriteLine($"      {k,-20} {v.Ms / (iters + 1),8:F2} ms  x{v.Calls / (iters + 1)}");
+                        EngineProfile.Reset();
+                    }
                 }
                 break;
 
@@ -203,6 +212,19 @@ internal static class Micro
                 (Func<int, Span<float>>, Action, Func<float[]>, IDisposable) Vk()
                 {
                     var s = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default.NewSession(model, shapes[0], opt);
+                    if (Environment.GetEnvironmentVariable("GCDRNET_PROF") == "1")
+                        return (k => s.GetInput(k), s.Run, () =>
+                        {
+                            float[] o = s.Output.ToArray();
+                            var agg = s.DebugProfile();
+                            Console.WriteLine($"    gpu sum {agg.Values.Sum():F3} ms over {s.PerDispatch!.Length} dispatches");
+                            foreach (var (name, ms) in agg.OrderByDescending(kv => kv.Value))
+                                Console.WriteLine($"    {name,-16} {ms,7:F3} ms  n={s.PerDispatch!.Count(d => d.Name.StartsWith(name + "("))}");
+                            if (Environment.GetEnvironmentVariable("PROF_ALL") == "1")
+                                foreach (var (name, ms) in s.PerDispatch!.OrderByDescending(d => d.Ms).Take(25))
+                                    Console.WriteLine($"      {ms,7:F3} ms {name}");
+                            return o;
+                        }, s);
                     return (k => s.GetInput(k), s.Run, () => s.Output.ToArray(), s);
                 }
                 (Func<int, Span<float>>, Action, Func<float[]>, IDisposable) Mtl()

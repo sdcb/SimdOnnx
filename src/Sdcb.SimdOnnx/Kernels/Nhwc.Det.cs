@@ -243,6 +243,44 @@ internal static unsafe partial class Nhwc
     }
 
     /// <summary>
+    /// SpaceToDepth of one image (<see cref="DepthToSpace"/>'s inverse): output (oc = ic·b², y, x) channel c
+    /// reads input (y·b + i, x·b + j) channel c / b² with sub = c % b² (CRD) or c % ic with sub = c / ic (DCR), sub = i·b + j.
+    /// </summary>
+    public static void SpaceToDepth(ReadOnlySpan<float> src, int ih, int iw, int ic, Span<float> dst, int b, bool crd, bool nhwc)
+    {
+        int bb = b * b, oc = ic * bb, oh = ih / b, ow = iw / b;
+        fixed (float* sp0 = src, dp0 = dst)
+        {
+            float* sp = sp0, dp = dp0;
+            For(oh, (long)oh * ow * oc, y =>
+            {
+                if (nhwc)
+                {
+                    float* orow = dp + (long)y * ow * oc;
+                    for (int x = 0; x < ow; x++)
+                    {
+                        float* o = orow + (long)x * oc;
+                        for (int sub = 0; sub < bb; sub++)
+                        {
+                            float* s = sp + ((long)(y * b + sub / b) * iw + x * b + sub % b) * ic;
+                            if (!crd) Copy(s, o + (long)sub * ic, ic);
+                            else for (int c = 0; c < ic; c++) o[c * bb + sub] = s[c];
+                        }
+                    }
+                    return;
+                }
+                for (int c = 0; c < oc; c++)
+                {
+                    int sub = crd ? c % bb : c / ic, ch = crd ? c / bb : c % ic;
+                    float* orow = dp + ((long)c * oh + y) * ow;
+                    float* srow = sp + ((long)ch * ih + y * b + sub / b) * iw + sub % b;
+                    for (int x = 0; x < ow; x++) orow[x] = srow[x * b];
+                }
+            });
+        }
+    }
+
+    /// <summary>
     /// Squeeze-excitation gate of one image (<see cref="ExecOp.ChannelGate"/>): channel means of the NHWC
     /// image (<paramref name="nhwc"/>) or of its NCHW planes, then the two small fully connected layers.
     /// </summary>

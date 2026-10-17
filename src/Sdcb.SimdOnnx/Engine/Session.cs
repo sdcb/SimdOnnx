@@ -183,17 +183,21 @@ public sealed unsafe class InferenceSession : IDisposable
                 {
                     if (n.P is LeakyReluP lp) Act.ApplyLeakyRelu(sp, dp, s.Length, lp.Alpha);
                     else if (n.P is ClipP cp) Act.ApplyClip(sp, dp, s.Length, cp.Min, cp.Max);
+                    else if (n.P is TanhP tp) Act.ApplyTanh(sp, dp, s.Length, tp.InScale, tp.OutScale);
                     else Act.ApplyTanh(sp, dp, s.Length);
                 }
                 break;
             }
-            case ExecOp.DepthToSpace:
+            case ExecOp.DepthToSpace or ExecOp.SpaceToDepth:
             {
                 // NCHW plans (the NHWC path is in ExecNhwc)
                 var p = (DepthToSpaceP)n.P!;
                 int[] i = values[n.In[0]].Shape;
                 for (int b = 0; b < i[0]; b++)
-                    Nhwc.DepthToSpace(Img(n.In[0], b, i[0]), i[2], i[3], i[1], ImgOut(n.Out[0], b, i[0]), p.Block, p.Crd, nhwc: false);
+                    if (n.Op == ExecOp.DepthToSpace)
+                        Nhwc.DepthToSpace(Img(n.In[0], b, i[0]), i[2], i[3], i[1], ImgOut(n.Out[0], b, i[0]), p.Block, p.Crd, nhwc: false);
+                    else
+                        Nhwc.SpaceToDepth(Img(n.In[0], b, i[0]), i[2], i[3], i[1], ImgOut(n.Out[0], b, i[0]), p.Block, p.Crd, nhwc: false);
                 break;
             }
             case ExecOp.Softmax:
@@ -398,6 +402,14 @@ public sealed unsafe class InferenceSession : IDisposable
                 int[] i = Nhwc4(values[n.In[0]]);
                 for (int b = 0; b < i[0]; b++)
                     Nhwc.DepthToSpace(Img(n.In[0], b, i[0]), i[1], i[2], i[3], ImgOut(n.Out[0], b, i[0]), p.Block, p.Crd, nhwc: true);
+                return true;
+            }
+            case ExecOp.SpaceToDepth:
+            {
+                var p = (DepthToSpaceP)n.P!;
+                int[] i = Nhwc4(values[n.In[0]]);
+                for (int b = 0; b < i[0]; b++)
+                    Nhwc.SpaceToDepth(Img(n.In[0], b, i[0]), i[1], i[2], i[3], ImgOut(n.Out[0], b, i[0]), p.Block, p.Crd, nhwc: true);
                 return true;
             }
             case ExecOp.ResizeNearest:

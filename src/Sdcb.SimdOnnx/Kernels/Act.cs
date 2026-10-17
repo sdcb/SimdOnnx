@@ -111,7 +111,9 @@ internal static unsafe class Act
 
     /// <summary>x &gt;= 0 ? x : alpha·x.</summary>
     public static void ApplyLeakyRelu(float* s, float* d, long n, float alpha) => Split(s, d, n, new Leaky(alpha));
-    public static void ApplyTanh(float* s, float* d, long n) => Split<Tanh>(s, d, n);
+    /// <summary>d = outScale · tanh(inScale · s).</summary>
+    public static void ApplyTanh(float* s, float* d, long n, float inScale = 1f, float outScale = 1f) =>
+        Split(s, d, n, new Tanh(inScale, outScale));
     public static void ApplyClip(float* s, float* d, long n, float min, float max) => Split(s, d, n, new Clip(min, max));
 
     private readonly struct Leaky(float alpha) : IAct
@@ -123,14 +125,18 @@ internal static unsafe class Act
         public Vector128<float> V(Vector128<float> x) => _max ? Vector128.Max(x, x * Vector128.Create(_a)) : Vector128.Min(x, x * Vector128.Create(_a));
         public float S(float x) => x < 0f ? x * _a : x;
     }
-    // tanh(x) = 2·sigmoid(2x) - 1
-    private struct Tanh : IAct
+    // o · tanh(i · x) = 2o · sigmoid(2i · x) - o
+    private readonly struct Tanh(float inScale, float outScale) : IAct
     {
-        public Vector<float> V(Vector<float> x) => SimdMath.SigmoidV(x + x) * new Vector<float>(2f) - Vector<float>.One;
-        public Vector256<float> V(Vector256<float> x) => SimdMath.SigmoidCore(x + x) * Vector256.Create(2f) - Vector256<float>.One;
-        public Vector128<float> V(Vector128<float> x) =>
-            (PackedSimd.IsSupported ? SimdMath.SigmoidPk(x + x) : SimdMath.SigmoidCore(x + x)) * Vector128.Create(2f) - Vector128<float>.One;
-        public float S(float x) => MathF.Tanh(x);
+        private readonly float _i2 = 2f * inScale, _o = outScale;
+        public Vector<float> V(Vector<float> x) => SimdMath.SigmoidV(x * new Vector<float>(_i2)) * new Vector<float>(2f * _o) - new Vector<float>(_o);
+        public Vector256<float> V(Vector256<float> x) => SimdMath.SigmoidCore(x * Vector256.Create(_i2)) * Vector256.Create(2f * _o) - Vector256.Create(_o);
+        public Vector128<float> V(Vector128<float> x)
+        {
+            Vector128<float> y = x * Vector128.Create(_i2);
+            return (PackedSimd.IsSupported ? SimdMath.SigmoidPk(y) : SimdMath.SigmoidCore(y)) * Vector128.Create(2f * _o) - Vector128.Create(_o);
+        }
+        public float S(float x) => _o * MathF.Tanh(x * _i2 * 0.5f);
     }
     private readonly struct Clip(float min, float max) : IAct
     {

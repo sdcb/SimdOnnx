@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// NHWC SpaceToDepth (d2s.comp's inverse): output (n, y, x, c), oc = ic b^2, reads input
+// (n, y b + sub / b, x b + sub % b, ch) with sub = c % b^2, ch = c / b^2 (CRD) or sub = c / ic, ch = c % ic (DCR).
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
+
+layout(push_constant) uniform PC { uint total, oc, oh, ow, ih, iw, b, crd; } p;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u + gl_GlobalInvocationID.x;
+    if (id >= p.total) return;
+    uint c = id % p.oc, px = id / p.oc;
+    uint xo = px % p.ow, r = px / p.ow, y = r % p.oh, n = r / p.oh;
+    uint bb = p.b * p.b, ic = p.oc / bb;
+    uint sub = p.crd != 0u ? c % bb : c / ic, ch = p.crd != 0u ? c / bb : c % ic;
+    o[id] = x[((n * p.ih + y * p.b + sub / p.b) * p.iw + xo * p.b + sub % p.b) * ic + ch];
+}

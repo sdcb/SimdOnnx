@@ -203,3 +203,16 @@ kernels on every backend instead of SimdPaddleOCR extensions:
 Not moved: GcdrNet's `UpHead` (resize → add → 1x1 conv, its full-resolution intermediate never
 stored) stays a GcdrNet extension until a second model needs it; its AVX-512 / NEON / WASM kernels
 are tuned to that network. Paddle's DB post-processing stays OCR code.
+
+## 2026-10-17 — Multi-input graphs and the first non-consumer model (DocGainNet)
+
+Graph inputs after the first take their shape from `CompileOptions.InputShapes` or the model's static
+dims; the arena planner puts every input buffer first, back to back in input order, so the GPU
+sessions keep staging one region (no per-input upload path) and `GetInput(i)` is a sub-span of it.
+LeakyRelu / Tanh / Clip / DepthToSpace landed as plain ops with their own parameter records rather than
+`ActivationKind` values: the CPU conv epilogues take an `ActivationKind` through ~70 signatures and
+carry no parameter, so a fused LeakyRelu needs a parameterized activation first — worth doing when a
+second model leans on it. The SpaceToDepth recognizer verifies the reshape / transpose chain's element
+map (every output axis swept plus 4k pseudo-random points) instead of matching exporter-specific
+reshape constants. A customer PR with the same four ops for CPU + Vulkan (sdcb/SimdOnnx#6) was closed
+in favour of this superset (Metal, DCR, multi-input).

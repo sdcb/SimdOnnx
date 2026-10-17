@@ -1,7 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "et.glsl"
-// Parameterized elementwise unary: mode 0 leaky relu (x >= 0 ? x : a x), 1 tanh, 2 clip(x, a, b)
+// Parameterized elementwise unary: mode 0 leaky relu (x >= 0 ? x : a x), 1 b tanh(a x), 2 clip(x, a, b), 3 a x + b
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
@@ -16,7 +16,8 @@ void main()
     float v = float(x[i]);
     float r;
     if (p.mode == 0u) r = v >= 0.0 ? v : v * p.a;
-    else if (p.mode == 1u) r = tanh(clamp(v, -15.0, 15.0));
-    else r = min(max(v, p.a), p.b);
+    else if (p.mode == 1u) r = p.b * tanh(clamp(v * p.a, -15.0, 15.0));
+    else if (p.mode == 2u) r = min(max(v, p.a), p.b);
+    else r = v * p.a + p.b;
     o[i] = ET(r);
 }

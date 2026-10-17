@@ -8,7 +8,8 @@ using P = Sdcb.SimdPaddleOCR.OnnxSharp;
 // usage: <model.onnx> <input_HxW.f32> <engines: gcdr,paddle,gcdr-vk,paddle-vk,gcdr-mtl,paddle-mtl> [threads] [iters]
 if (args[0] == "--micro")
 {
-    Environment.SetEnvironmentVariable("GCDRNET_THREADS", "1");
+    // kernel micro-benchmarks run single-threaded; whole-model runs (multi) take a thread count instead
+    if (args[1] != "multi") Environment.SetEnvironmentVariable("GCDRNET_THREADS", "1");
     Sdcb.SimdOnnx.Bench.Micro.Run(args[1..]);
     return;
 }

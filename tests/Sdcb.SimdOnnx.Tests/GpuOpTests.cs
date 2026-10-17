@@ -251,7 +251,7 @@ public class GpuOpTests
             .Init("W1", Rand(rng, 16 * c * 9, 0.3f), 16, c, 3, 3).Init("B1", Rand(rng, 16, 0.3f), 16)
             .Init("W2", Rand(rng, 64 * 16, 0.3f), 64, 16, 1, 1)
             .Init("Wg", Rand(rng, 32 * 4, 0.5f), 32, 4).Init("Bg", Rand(rng, 32, 0.5f), 32)
-            .Init("third", [1f / 3f]).Init("three", [3f]).Init("lo", [-0.5f]).Init("hi", [0.7f])
+            .Init("third", [1f / 3f]).Init("three", [3f]).Init("lo", [-0.5f]).Init("hi", [0.7f]).Init("half", [0.25f])
             .InitI64("ax3", [3], 1).InitI64("ax23", [2, 3], 2).InitI64("r1", [0, 0, -1, 2, 0], 5)
             .InitI64("r2", [0, 0, 0, 0, -1, 2], 6).InitI64("r3", [0, -1, 1, 1, 0, 0], 6)
             .Node("Conv", ["x", "W1", "B1"], ["c1"], ("kernel_shape", new[] { 3, 3 }), ("pads", new[] { 1, 1, 1, 1 }))
@@ -269,12 +269,18 @@ public class GpuOpTests
             .Node("Unsqueeze", ["gg", "ax23"], ["g4"])                                   // [1,32,1,1]
             .Node("Slice", ["g4"], ["g16"], ("starts", new[] { 0 }), ("ends", new[] { 16 }), ("axes", new[] { 1 }))
             .Node("Add", ["un", "g16"], ["sum"])
-            .Node("Clip", ["sum", "lo", "hi"], ["y"])
+            .Node("Sub", ["half", "sum"], ["sum2"])                                      // scalar - x: GPU affine pass
+            .Node("Clip", ["sum2", "lo", "hi"], ["y"])
             .Output("y").Build();
         OnnxModel m = OnnxModel.Load(model);
         int[][] shapes = [[1, c, 10, 12], [1, 4, 6, 6]];
         var opt = new CompileOptions(Nhwc: true);
-        using var cpu = new InferenceSession(GraphCompiler.Compile(m, shapes[0], opt));
+        ExecPlan plan = GraphCompiler.Compile(m, shapes[0], opt);
+        // 3·tanh(x/3) folds into one scaled Tanh; the rank-6 pixel unshuffle into a SpaceToDepth
+        Assert.Contains(plan.Nodes, x => x.Op == ExecOp.Tanh && x.P is TanhP { InScale: > 0.33f and < 0.34f, OutScale: 3f });
+        Assert.Contains(plan.Nodes, x => x.Op == ExecOp.SpaceToDepth && x.P is DepthToSpaceP { Block: 2, Crd: true });
+        Assert.DoesNotContain(plan.Nodes, x => x.Op == ExecOp.Transpose && plan.Values[x.In[0]].Shape.Length > 4);
+        using var cpu = new InferenceSession(plan);
         Assert.Equal(2, cpu.InputCount);
         Assert.Equal(shapes[1], cpu.GetInputShape(1));   // static dims from the model
         var r = new Random(4);

@@ -175,7 +175,7 @@ public sealed class LayoutPlanner
                 break;
             }
             case ExecOp.Conv or ExecOp.MaxPool or ExecOp.ResizeBilinear or ExecOp.Pad
-                or ExecOp.GlobalAvgPool or ExecOp.ConvTranspose or ExecOp.ResizeNearest or ExecOp.AvgPool or ExecOp.DepthToSpace:
+                or ExecOp.GlobalAvgPool or ExecOp.ConvTranspose or ExecOp.ResizeNearest or ExecOp.AvgPool or ExecOp.DepthToSpace or ExecOp.SpaceToDepth:
             {
                 if (_values[n.In[0]].Shape.Length != 4 || _values[n.Out[0]].Shape.Length != 4)
                     throw new NotSupportedException($"layout: {n.Op} '{n.Name}' is not rank-4.");
@@ -229,7 +229,11 @@ public sealed class LayoutPlanner
             {
                 int[] os = _values[n.Out[0]].Shape;
                 int rank = os.Length;
-                int ri = Array.FindIndex(n.In, v => _values[v].IsActivation && _values[v].Shape.SequenceEqual(os));
+                // a full-shape operand's layout; with several, a channels-last one (an NCHW graph input mixed
+                // with conv features then gets one cached relayout instead of every feature map going back)
+                int ri = Array.FindIndex(n.In, v => _values[v].IsActivation && _values[v].Shape.SequenceEqual(os)
+                    && rank == 4 && Layout.Equivalent(os, L(v), Layout.Nhwc));
+                if (ri < 0) ri = Array.FindIndex(n.In, v => _values[v].IsActivation && _values[v].Shape.SequenceEqual(os));
                 int[] lo = ri >= 0 ? L(n.In[ri]) : Layout.Identity(rank);
                 for (int k = 0; k < n.In.Length; k++)
                 {
@@ -259,7 +263,11 @@ public sealed class LayoutPlanner
             }
             case ExecOp.Concat:
             {
+                // channels-last when any rank-4 input already is (same reasoning as elementwise)
                 int[] lo = L(n.In[0]);
+                foreach (int v in n.In)
+                    if (_values[v].Shape.Length == 4 && Layout.Equivalent(_values[v].Shape, L(v), Layout.Nhwc)) { lo = Layout.Nhwc; break; }
+                Need(n, 0, lo);
                 for (int k = 1; k < n.In.Length; k++) Need(n, k, lo);
                 var cp = (ConcatP)n.P!;
                 cp.Axis = Array.IndexOf(lo, cp.Axis);

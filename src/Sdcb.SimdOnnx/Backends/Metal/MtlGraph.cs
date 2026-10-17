@@ -429,6 +429,31 @@ public sealed class MtlGraphModel : IDisposable
                 int[] astr = PhysBroadcastStrides(a, o);
                 int[] bstr = PhysBroadcastStrides(bv, o);
                 uint act = p.Act switch { ActivationKind.Relu => 1u, ActivationKind.Sigmoid => 2u, _ => 0u };
+                // x op scalar const (and s + x, s - x, s · x): one affine pass a·x + b over the full operand
+                int ak = -1;
+                float sa = 0f, sb = 0f;
+                for (int k = 0; k < 2 && ak < 0 && p.Act == ActivationKind.None; k++)
+                {
+                    if (V[n.In[1 - k]].Floats is not [var c] || V[n.In[k]].Buf < 0 || V[n.In[k]].ElementCount != nOut()
+                        || !PhysBroadcastStrides(V[n.In[k]], o).SequenceEqual(ostr)) continue;
+                    bool ok = true;
+                    (sa, sb) = (p.Op, k) switch
+                    {
+                        (EwOp.Add, _) => (1f, c),
+                        (EwOp.Mul, _) => (c, 0f),
+                        (EwOp.Sub, 0) => (1f, -c),
+                        (EwOp.Sub, _) => (-1f, c),
+                        (EwOp.Div, 0) => (1f / c, 0f),
+                        _ => (0f, 0f),
+                    };
+                    if (p.Op == EwOp.Div && k == 1) ok = false;   // c / x is not affine
+                    if (ok) ak = k;
+                }
+                if (ak >= 0)
+                {
+                    yield return ND("unary2", [Bind(n.In[ak]), Bind(n.Out[0])], PcOfF([(uint)nOut(), 3u], sa, sb), G((uint)nOut()));
+                    break;
+                }
                 // same-storage fast path: vec4 (n % 4 guard — no OOB tail writes)
                 bool dense = astr.SequenceEqual(ostr) && bstr.SequenceEqual(ostr);
                 if (nOut() % 4 == 0 && dense)
@@ -697,18 +722,20 @@ public sealed class MtlGraphModel : IDisposable
                 {
                     LeakyReluP lp => (0u, lp.Alpha, 0f),
                     ClipP cp => (2u, cp.Min, cp.Max),
-                    _ => (1u, 0f, 0f),
+                    TanhP tp => (1u, tp.InScale, tp.OutScale),
+                    _ => (1u, 1f, 1f),
                 };
                 yield return ND("unary2", [Bind(n.In[0]), Bind(n.Out[0])], PcOfF([(uint)nOut(), mode], a, b), G((uint)nOut()));
                 break;
             }
 
-            case ExecOp.DepthToSpace:
+            case ExecOp.DepthToSpace or ExecOp.SpaceToDepth:
             {
                 var p = (DepthToSpaceP)n.P!;
+                string d2sName = n.Op == ExecOp.DepthToSpace ? "d2s" : "s2d";
                 RequireNhwc(n.In[0]); RequireNhwc(n.Out[0]);
                 int[] si = nhwcIn(0), so = nhwcOut();
-                yield return ND("d2s", [Bind(n.In[0]), Bind(n.Out[0])],
+                yield return ND(d2sName, [Bind(n.In[0]), Bind(n.Out[0])],
                     PcOf((uint)nOut(), (uint)so[3], (uint)so[1], (uint)so[2], (uint)si[1], (uint)si[2], (uint)p.Block, p.Crd ? 1u : 0u),
                     G((uint)nOut()), name: "d2s");
                 break;

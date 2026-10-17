@@ -83,6 +83,32 @@ internal static unsafe class Ew
         }
     }
 
+    /// <summary><see cref="Binary"/> on the calling thread (callers that already split the work).</summary>
+    public static void BinarySerial(float* a, float* b, float* d, long n, EwOp op, bool relu)
+    {
+        switch (op)
+        {
+            case EwOp.Add: Run<Add>(a, b, d, n, relu); break;
+            case EwOp.Sub: Run<Sub>(a, b, d, n, relu); break;
+            case EwOp.Mul: Run<Mul>(a, b, d, n, relu); break;
+            default: Run<Div>(a, b, d, n, relu); break;
+        }
+    }
+
+    /// <summary><see cref="Scalar"/> on the calling thread.</summary>
+    public static void ScalarSerial(float* a, float s, float* d, long n, EwOp op, bool rev, bool relu)
+    {
+        switch (op)
+        {
+            case EwOp.Add: RunS<Add>(a, s, d, n, relu); break;
+            case EwOp.Mul: RunS<Mul>(a, s, d, n, relu); break;
+            case EwOp.Sub when rev: RunS<RSub>(a, s, d, n, relu); break;
+            case EwOp.Sub: RunS<Sub>(a, s, d, n, relu); break;
+            case EwOp.Div when rev: RunS<RDiv>(a, s, d, n, relu); break;
+            default: RunS<Div>(a, s, d, n, relu); break;
+        }
+    }
+
     /// <summary>d = a op s (or s op a when <paramref name="rev"/>).</summary>
     public static void Scalar(float* a, float s, float* d, long n, EwOp op, bool rev, bool relu)
     {

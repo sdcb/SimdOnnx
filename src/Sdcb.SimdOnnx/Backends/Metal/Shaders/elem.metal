@@ -95,7 +95,7 @@ kernel void transpose6(device const half* x [[buffer(0)]],
     o[gid] = x[d0 * p.ps0 + d1 * p.ps1 + d2 * p.ps2 + d3 * p.ps3 + d4 * p.ps4 + d5 * p.ps5];
 }
 
-// ---- unary2: mode 0 leaky relu (x >= 0 ? x : a x), 1 tanh, 2 clip(x, a, b) ----
+// ---- unary2: mode 0 leaky relu (x >= 0 ? x : a x), 1 b tanh(a x), 2 clip(x, a, b), 3 a x + b ----
 struct PcUnary2 { uint n, mode; float a, b; };
 kernel void unary2(device const half* x [[buffer(0)]],
                    device half* o [[buffer(1)]],
@@ -106,8 +106,9 @@ kernel void unary2(device const half* x [[buffer(0)]],
     float v = float(x[gid]);
     float r;
     if (p.mode == 0u) r = v >= 0.0f ? v : v * p.a;
-    else if (p.mode == 1u) r = precise::tanh(clamp(v, -15.0f, 15.0f));
-    else r = min(max(v, p.a), p.b);
+    else if (p.mode == 1u) r = p.b * precise::tanh(clamp(v * p.a, -15.0f, 15.0f));
+    else if (p.mode == 2u) r = min(max(v, p.a), p.b);
+    else r = v * p.a + p.b;
     o[gid] = half(r);
 }
 
@@ -125,6 +126,20 @@ kernel void d2s(device const half* x [[buffer(0)]],
     uint ch = p.crd != 0u ? c * p.b * p.b + sub : sub * p.oc + c;
     uint ic = p.oc * p.b * p.b;
     o[gid] = x[((n * p.ih + y / p.b) * p.iw + xo / p.b) * ic + ch];
+}
+
+// ---- s2d: NHWC SpaceToDepth (d2s's inverse; CRD: sub = c % b^2, ch = c / b^2; DCR: sub = c / ic, ch = c % ic) ----
+kernel void s2d(device const half* x [[buffer(0)]],
+                device half* o [[buffer(1)]],
+                constant PcD2s& p [[buffer(2)]],
+                uint gid [[thread_position_in_grid]])
+{
+    if (gid >= p.total) return;
+    uint c = gid % p.oc, px = gid / p.oc;
+    uint xo = px % p.ow, r = px / p.ow, y = r % p.oh, n = r / p.oh;
+    uint bb = p.b * p.b, ic = p.oc / bb;
+    uint sub = p.crd != 0u ? c % bb : c / ic, ch = p.crd != 0u ? c / bb : c % ic;
+    o[gid] = x[((n * p.ih + y * p.b + sub / p.b) * p.iw + xo * p.b + sub % p.b) * ic + ch];
 }
 
 // ---- slice: rank<=4 strided slice ----

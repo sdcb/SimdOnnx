@@ -332,6 +332,8 @@ internal static class GraphCompiler
             CommuteActBeforeTranspose(nodes, values);
             FuseLateAct(nodes, values);
             if (Env.Flag("NOFUSE_SE") != "1") FuseChannelGate(nodes, values, outputValue);
+            FuseScaledTanh(nodes, values, outputValue);
+            FuseSpaceToDepth(nodes, values, outputValue);
             if (opt.Gpu && Env.Flag("NOFUSE_ATTN") != "1" && FuseAttention(nodes, values, outputValue))
                 Prune(nodes, values, outputValue);   // the q / k / v slices and transposes it reads through
         }
@@ -411,6 +413,152 @@ internal static class GraphCompiler
                 }
             }
             nodes.RemoveAll(n => n is null);
+        }
+
+        /// <summary>Mul(x, s) -> Tanh -> Mul(·, t) with scalar consts s, t (soft clamps such as 3·tanh(x / 3))
+        /// becomes one Tanh with <see cref="TanhP"/> scales: two full-size passes less.</summary>
+        [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+        private static void FuseScaledTanh(List<ExecNode> nodes, List<CValue> values, int outputValue)
+        {
+            var bx = new BufIndex(nodes, values, outputValue);
+            float Scalar(int v) => values[v].Floats is [var f] ? f : float.NaN;
+            bool any = false;
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                ExecNode t = nodes[i];
+                if (t is null || t.Op != ExecOp.Tanh || t.In.Length != 1) continue;
+                var p = (TanhP?)t.P ?? new TanhP();
+                // input side: x * s (either operand order), the product read only by the tanh
+                if (bx.Single(t.In[0]) && bx.Producer(t.In[0]) is { Op: ExecOp.Elementwise, P: EwP { Op: EwOp.Mul, Act: ActivationKind.None } } m
+                    && m.Out[0] == t.In[0] && m.In.Length == 2)
+                {
+                    int k = !float.IsNaN(Scalar(m.In[1])) ? 1 : !float.IsNaN(Scalar(m.In[0])) ? 0 : -1;
+                    if (k >= 0 && values[m.In[1 - k]].Shape.SequenceEqual(values[t.Out[0]].Shape))
+                    {
+                        p.InScale *= Scalar(m.In[k]);
+                        t.In = [m.In[1 - k]];
+                        nodes[nodes.IndexOf(m)] = null!;
+                        any = true;
+                    }
+                }
+                // output side: tanh(·) * t, the tanh read only by that Mul
+                int o = t.Out[0];
+                if (bx.Single(o) && nodes.Find(x => x is not null && x.In.Contains(o)) is
+                    { Op: ExecOp.Elementwise, P: EwP { Op: EwOp.Mul, Act: ActivationKind.None } } mo && mo.In.Length == 2)
+                {
+                    int k = mo.In[0] == o ? 1 : 0;
+                    if (mo.In[1 - k] == o && !float.IsNaN(Scalar(mo.In[k])) && values[mo.Out[0]].Shape.SequenceEqual(values[o].Shape))
+                    {
+                        p.OutScale *= Scalar(mo.In[k]);
+                        t.Out = mo.Out;
+                        bx.SetProducer(mo.Out[0], t);
+                        nodes[nodes.IndexOf(mo)] = null!;
+                        any = true;
+                    }
+                }
+                t.P = p;
+            }
+            if (any) nodes.RemoveAll(n => n is null);
+        }
+
+        /// <summary>
+        /// Zero-copy reshapes -> one rank 5/6 Transpose -> zero-copy reshapes from a [N,C,H,W] value to
+        /// [N,C·b²,H/b,W/b] (a pixel unshuffle as torch exports it) becomes one <see cref="ExecOp.SpaceToDepth"/>
+        /// when its element map is SpaceToDepth's (CRD or DCR order): checked along every output axis and at
+        /// pseudo-random points. Saves the rank-6 relayouts the planner would otherwise insert.
+        /// </summary>
+        [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+        private static void FuseSpaceToDepth(List<ExecNode> nodes, List<CValue> values, int outputValue)
+        {
+            var bx = new BufIndex(nodes, values, outputValue);
+            bool any = false;
+            for (int ti = 0; ti < nodes.Count; ti++)
+            {
+                ExecNode t = nodes[ti];
+                if (t.Op != ExecOp.Transpose || t.P is not TransposeP tp || t.In.Length != 1 || values[t.In[0]].Shape.Length < 5) continue;
+                // back to the materialized 4D source through same-buffer views
+                int u = t.In[0], x = u;
+                while (values[x].AliasOf is int a and >= 0 && values[a].Buf == values[x].Buf) x = a;
+                if (values[x].Shape.Length != 4 || values[x].Buf < 0) continue;
+                // forward: the transpose output is read only through one chain of views ending at a 4D value
+                int w = t.Out[0], wb = values[w].Buf, y = w;
+                if (w == outputValue || !bx.Single(w)) continue;
+                while (true)
+                {
+                    int next = -1, kids = 0;
+                    for (int v = 0; v < values.Count; v++)
+                        if (values[v].AliasOf == y && values[v].Buf == wb && Readers(v)) { next = v; kids++; }
+                    if (kids != 1) break;
+                    y = next;
+                }
+                if (y == w || values[y].Shape.Length != 4 || nodes.Any(m => m != t && m.In.Any(v => values[v].Buf == wb && v != y))) continue;
+                int[] xs = values[x].Shape, ys = values[y].Shape;
+                if (xs[0] != ys[0] || ys[1] % xs[1] != 0) continue;
+                int bb = ys[1] / xs[1], b = (int)Math.Round(Math.Sqrt(bb));
+                if (b < 2 || b * b != bb || xs[2] != ys[2] * b || xs[3] != ys[3] * b) continue;
+                int[] ws = values[w].Shape, us = values[u].Shape;
+                long Map(long yflat)
+                {
+                    // y and w share row-major element order, as do u and x; the transpose links w to u
+                    Span<long> iw = stackalloc long[ws.Length], iu = stackalloc long[us.Length];
+                    for (int d = ws.Length - 1; d >= 0; d--) { iw[d] = yflat % ws[d]; yflat /= ws[d]; }
+                    for (int d = 0; d < ws.Length; d++) iu[tp.Perm[d]] = iw[d];
+                    long f = 0;
+                    for (int d = 0; d < us.Length; d++) f = f * us[d] + iu[d];
+                    return f;
+                }
+                long Want(long n, long c, long h, long wq, bool crd)
+                {
+                    int cx = xs[1];
+                    long sub = crd ? c % bb : c / cx, ch = crd ? c / bb : c % cx;
+                    long i = sub / b, j = sub % b;
+                    return ((n * cx + ch) * xs[2] + h * b + i) * xs[3] + wq * b + j;
+                }
+                bool Matches(bool crd)
+                {
+                    long total = (long)ys[0] * ys[1] * ys[2] * ys[3];
+                    var rng = new Random(17);
+                    for (int k = 0; k < 4096; k++)
+                    {
+                        long n, c, h, wq;
+                        if (k < 4 * 64)
+                        {
+                            // sweep one axis at a time (others at a non-zero point)
+                            int axis = k / 64, step = k % 64;
+                            long[] idx = [ys[0] / 2, ys[1] / 3, ys[2] / 3, ys[3] / 3];
+                            idx[axis] = Math.Min(ys[axis] - 1, (long)step * ys[axis] / 64);
+                            (n, c, h, wq) = (idx[0], idx[1], idx[2], idx[3]);
+                        }
+                        else
+                        {
+                            long r = (long)(rng.NextDouble() * total);
+                            wq = r % ys[3]; r /= ys[3]; h = r % ys[2]; r /= ys[2]; c = r % ys[1]; n = r / ys[1];
+                        }
+                        long yflat = ((n * ys[1] + c) * ys[2] + h) * ys[3] + wq;
+                        if (Map(yflat) != Want(n, c, h, wq, crd)) return false;
+                    }
+                    return true;
+                }
+                bool? crdMode = Matches(true) ? true : Matches(false) ? false : null;
+                if (crdMode is null) continue;
+                // y becomes the produced value (the transpose's buffer, same size); w and the views are dead
+                values[y].AliasOf = -1;
+                nodes[ti] = new ExecNode
+                {
+                    Op = ExecOp.SpaceToDepth, In = [x], Out = [y], P = new DepthToSpaceP { Block = b, Crd = crdMode.Value },
+                    SrcNode = t.SrcNode, Name = t.Name,
+                };
+                any = true;
+            }
+            if (any) Prune(nodes, values, outputValue);
+
+            // a view somebody reads (directly or through further views)
+            bool Readers(int v)
+            {
+                foreach (ExecNode m in nodes) if (m.In.Contains(v)) return true;
+                foreach (CValue c in values) if (c.AliasOf == v) return true;
+                return v == outputValue;
+            }
         }
 
         private static int[] Squeezed(int[] shape) => shape.Where(d => d != 1).ToArray();

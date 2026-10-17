@@ -434,9 +434,12 @@ internal static unsafe partial class Ops
                 return;
             }
         }
-        // general broadcast (strided)
-        BroadcastLoop(a, aShape, b, bShape, dst, outShape, op);
-        if (act != ActivationKind.None) Activation(dst, dst, act);
+        // general broadcast: coalesced strided rows over the threads
+        int r = outShape.Length;
+        fixed (float* pa = a, pb = b, pd = dst)
+            Strided.Binary(pa, Strided.BroadcastStrides(aShape, r), pb, Strided.BroadcastStrides(bShape, r), outShape, pd, op,
+                relu: act == ActivationKind.Relu);
+        if (act is not (ActivationKind.None or ActivationKind.Relu)) Activation(dst, dst, act);
     }
 
     private static bool Same(int[] a, int[] b) => a.AsSpan().SequenceEqual(b);
@@ -499,29 +502,6 @@ internal static unsafe partial class Ops
             d[i] = op == 1 ? s - b[i] : s / b[i];
     }
 
-    private static void BroadcastLoop(ReadOnlySpan<float> a, int[] aShape,
-        ReadOnlySpan<float> b, int[] bShape, Span<float> dst, int[] outShape, EwOp op)
-    {
-        int rank = outShape.Length;
-        int[] aStr = BroadcastStrides(aShape, rank), bStr = BroadcastStrides(bShape, rank);
-        int[] outStr = StridesOf(outShape);
-        int n = outShape.Aggregate(1, (x, y) => x * y);
-        for (int e = 0; e < n; e++)
-        {
-            int rem = e, ao = 0, bo = 0;
-            for (int d = 0; d < rank; d++)
-            {
-                int c = rem / outStr[d];
-                rem %= outStr[d];
-                ao += c * aStr[d]; bo += c * bStr[d];
-            }
-            dst[e] = op switch
-            {
-                EwOp.Add => a[ao] + b[bo], EwOp.Sub => a[ao] - b[bo],
-                EwOp.Mul => a[ao] * b[bo], _ => a[ao] / b[bo],
-            };
-        }
-    }
 
     private static int[] BroadcastStrides(int[] shape, int rank)
     {
@@ -836,7 +816,10 @@ internal static unsafe partial class Ops
                 Transpose2D(src.Slice(o * a * b, a * b), dst.Slice(o * a * b, a * b), a, b);
             return;
         }
-        if (rank == 4 && perm[0] == 0 && perm[1] == 3 && perm[2] == 1 && perm[3] == 2)
+        // few channels (image tensors in and out of NHWC plans): the threaded strided gather beats the
+        // single-threaded 2D transposes below
+        bool fewC = rank == 4 && (perm is [0, 3, 1, 2] ? inShape[3] : perm is [0, 2, 3, 1] ? inShape[1] : int.MaxValue) <= 8;
+        if (rank == 4 && !fewC && perm[0] == 0 && perm[1] == 3 && perm[2] == 1 && perm[3] == 2)
         {
             // [n,h,w,c] -> [n,c,h,w] == per image 2D transpose of [hw,c]->[c,hw]
             int hw = inShape[1] * inShape[2], cc = inShape[3], per = hw * cc;
@@ -849,7 +832,7 @@ internal static unsafe partial class Ops
             }
             return;
         }
-        if (rank == 4 && perm[0] == 0 && perm[1] == 2 && perm[2] == 3 && perm[3] == 1)
+        if (rank == 4 && !fewC && perm[0] == 0 && perm[1] == 2 && perm[2] == 3 && perm[3] == 1)
         {
             // [n,c,h,w] -> [n,h,w,c] == per image 2D transpose of [c,hw]->[hw,c]
             int cc = inShape[1], hw = inShape[2] * inShape[3], per = hw * cc;
@@ -862,22 +845,11 @@ internal static unsafe partial class Ops
             }
             return;
         }
-        // generic permute
-        int[] inStr = StridesOf(inShape), outStr = StridesOf(outShape);
-        int[] permutedInStr = new int[rank];
+        // generic permute: coalesced strided gather over the threads
+        int[] inStr = StridesOf(inShape);
+        long[] permutedInStr = new long[rank];
         for (int i = 0; i < rank; i++) permutedInStr[i] = inStr[perm[i]];
-        int n = outShape.Aggregate(1, (x, y) => x * y);
-        for (int e = 0; e < n; e++)
-        {
-            int rem = e, so = 0;
-            for (int d = 0; d < rank; d++)
-            {
-                int c = rem / outStr[d];
-                rem %= outStr[d];
-                so += c * permutedInStr[d];
-            }
-            dst[e] = src[so];
-        }
+        fixed (float* sp = src, dp = dst) Strided.Gather(sp, 0, permutedInStr, outShape, dp);
     }
 
     // tiled [a,b] -> [b,a]
@@ -899,43 +871,15 @@ internal static unsafe partial class Ops
         int[] outShape, SliceP p)
     {
         int rank = inShape.Length;
-        int[] inStr = StridesOf(inShape), outStr = StridesOf(outShape);
+        int[] inStr = StridesOf(inShape);
         int[] start = new int[rank], step = Enumerable.Repeat(1, rank).ToArray();
         for (int i = 0; i < p.Axes.Length; i++) { start[p.Axes[i]] = p.Starts[i]; step[p.Axes[i]] = p.Steps[i]; }
-        int total = outShape.Aggregate(1, (a, b) => a * b);
-        if (total == 0) return;
-        // fast path: contiguous tail (last sliced axis is innermost and steps 1)
-        int innerAxis = rank - 1;
-        if (step[innerAxis] == 1)
-        {
-            int innerLen = outShape[innerAxis];
-            int innerOff = start[innerAxis];
-            int outer = total / innerLen;
-            for (int e = 0; e < outer; e++)
-            {
-                int rem = e, so = 0;
-                for (int d = 0; d < rank - 1; d++)
-                {
-                    int cc = rem / (outStr[d] / innerLen);
-                    rem %= outStr[d] / innerLen;
-                    so += (start[d] + cc * step[d]) * inStr[d];
-                }
-                src.Slice(so + innerOff, innerLen).CopyTo(dst.Slice(e * innerLen, innerLen));
-            }
-            return;
-        }
-        int n = outShape.Aggregate(1, (a, b) => a * b);
-        for (int e = 0; e < n; e++)
-        {
-            int rem = e, so = 0;
-            for (int d = 0; d < rank; d++)
-            {
-                int cc = rem / outStr[d];
-                rem %= outStr[d];
-                so += (start[d] + cc * step[d]) * inStr[d];
-            }
-            dst[e] = src[so];
-        }
+        if (outShape.Aggregate(1, (a, b) => a * b) == 0) return;
+        // coalesced strided gather over the threads
+        long off = 0;
+        long[] str = new long[rank];
+        for (int d = 0; d < rank; d++) { off += (long)start[d] * inStr[d]; str[d] = (long)step[d] * inStr[d]; }
+        fixed (float* sp = src, dp = dst) Strided.Gather(sp, off, str, outShape, dp);
     }
 
     // ======================== Concat ========================

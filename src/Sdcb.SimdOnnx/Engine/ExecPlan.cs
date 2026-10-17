@@ -36,6 +36,7 @@ public enum ExecOp
     Tanh,
     Clip,            // clamp(x, min, max) (ClipP)
     DepthToSpace,    // NCHW [N, C*b*b, H, W] -> [N, C, H*b, W*b] (DepthToSpaceP)
+    SpaceToDepth,    // NCHW [N, C, H*b, W*b] -> [N, C*b*b, H, W] (DepthToSpaceP: the inverse channel order)
 }
 
 public enum ActivationKind { None, Relu, Sigmoid, Gelu, HardSwish, Swish }
@@ -124,6 +125,12 @@ public sealed class LeakyReluP
     public float Alpha = 0.01f;
 }
 
+/// <summary>OutScale · tanh(InScale · x) (scalar Muls around a Tanh fold in; null P = 1, 1).</summary>
+public sealed class TanhP
+{
+    public float InScale = 1f, OutScale = 1f;
+}
+
 public sealed class ClipP
 {
     public float Min = float.NegativeInfinity, Max = float.PositiveInfinity;
@@ -132,7 +139,8 @@ public sealed class ClipP
 public sealed class DepthToSpaceP
 {
     public int Block;
-    /// <summary>CRD: input channel c·b² + i·b + j feeds output (c, h·b + i, w·b + j); DCR: (i·b + j)·C + c.</summary>
+    /// <summary>CRD: input channel c·b² + i·b + j feeds output (c, h·b + i, w·b + j); DCR: (i·b + j)·C + c.
+    /// SpaceToDepth uses the same correspondence the other way round.</summary>
     public bool Crd;
 }
 

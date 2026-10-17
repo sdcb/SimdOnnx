@@ -90,6 +90,27 @@ PSNR goldens identical.
    (no longer triggered).
 5. **Metal performance** unmeasured against the old engines (correctness checked in CI).
 
+## DocGainNet (2026-10-17, new model: no old engine to compare with)
+
+`F:\_\code\DocGainNetelease\docgainnet.onnx`, image 1x3x1152x1600 + thumb 1x3x512x512, a RealDAE
+photo; `bench --micro multi` against onnxruntime 1.31 CPU (`tools/ort_ref_multi.py`).
+
+| engine | median ms | min ms | vs ORT fp32 |
+|---|---:|---:|---|
+| onnxruntime CPU, 16 threads | 154.0 | 147.5 | — |
+| SimdOnnx CPU, 16 threads | 115.8 | 96.1 | max \|d\| 2.6e-6 |
+| SimdOnnx Vulkan (B580, fp16 storage) | 14.45 | 14.41 | PSNR 68.7 dB |
+
+The first working version ran the CPU in 540 ms: the graph's full-resolution tail (a per-pixel 3x4
+colour affine on channel slices, a pixel unshuffle, mixed NCHW input / NHWC features) went through
+single-threaded per-element index loops. Generic fixes, no model-specific kernel: coalesced, threaded
+strided gather / broadcast (`Kernels/Strided.cs`) behind Transpose, Slice and broadcast Elementwise;
+the layout planner prefers channels-last for mixed-layout elementwise / Concat (one cached relayout
+of the NCHW input); `x·s -> Tanh -> ·t` folds into one scaled Tanh; scalar-const elementwise is one
+affine pass on the GPUs; a reshape / rank-6 transpose / reshape pixel unshuffle is recognised as
+SpaceToDepth. Paddle / GcdrNet plans are unchanged (planhash) and their CPU / Vulkan runs equal.
+Not done: LeakyRelu (23 nodes, ~7 ms CPU / 0.5 ms GPU) still runs as its own pass after each conv.
+
 ## Engine fusions for SE / attention / FPN merge (2026-10-17)
 
 Paddle, interleaved 3 rounds against the old engine, SimdOnnx with the fusions (consumers at
