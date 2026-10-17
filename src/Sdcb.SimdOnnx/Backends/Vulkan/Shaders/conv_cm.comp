@@ -244,14 +244,25 @@ void main()
 
     uint kq = tid % BKQ;
     uint r0 = tid / BKQ;
-    [[unroll]] for (uint i = 0u; i < LA; i++) {
-        uint gm = m0 + r0 + i * RSTEP;
-        uint img = gm / (p.outH * p.outW), gr = gm - img * (p.outH * p.outW);
-        uint oy = gr / p.outW, ox = gr - oy * p.outW;
-        rowBase[i] = img * p.inH * p.inW;
-        rowOk[i] = gm < p.mDim;
-        rowY[i] = int(oy * p.sH) - int(p.pT);
-        rowX[i] = int(ox * p.sW) - int(p.pL);
+    if (p.mDim <= p.outH * p.outW) {
+        [[unroll]] for (uint i = 0u; i < LA; i++) {
+            uint gm = m0 + r0 + i * RSTEP;
+            uint oy = gm / p.outW, ox = gm - oy * p.outW;
+            rowBase[i] = 0u;
+            rowOk[i] = gm < p.mDim;
+            rowY[i] = int(oy * p.sH) - int(p.pT);
+            rowX[i] = int(ox * p.sW) - int(p.pL);
+        }
+    } else {
+        [[unroll]] for (uint i = 0u; i < LA; i++) {
+            uint gm = m0 + r0 + i * RSTEP;
+            uint img = gm / (p.outH * p.outW), gr = gm - img * (p.outH * p.outW);
+            uint oy = gr / p.outW, ox = gr - oy * p.outW;
+            rowBase[i] = img * p.inH * p.inW;
+            rowOk[i] = gm < p.mDim;
+            rowY[i] = int(oy * p.sH) - int(p.pT);
+            rowX[i] = int(ox * p.sW) - int(p.pL);
+        }
     }
     uint nk = (p.kDim + 31u) / 32u;
 
