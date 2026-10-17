@@ -148,6 +148,69 @@ internal static class Micro
                 }
                 break;
             }
+            case "multi":
+            {
+                // multi-input model against a reference output (tools/ort_ref_multi.py):
+                // micro multi <model.onnx> <shape0;shape1;..> <in0.f32,in1.f32,..> <ref.f32> <cpu,vulkan,metal> [iters] [threads]
+                var model = Sdcb.SimdOnnx.Onnx.OnnxModel.Load(args[1]);
+                int[][] shapes = args[2].Split(';').Select(s => s.Split('x').Select(int.Parse).ToArray()).ToArray();
+                float[][] ins = args[3].Split(',').Select(f => System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(f)).ToArray()).ToArray();
+                float[] want = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(args[4])).ToArray();
+                int iters = args.Length > 6 ? int.Parse(args[6]) : 10;
+                int threads = args.Length > 7 ? int.Parse(args[7]) : Environment.ProcessorCount;
+                var opt = new CompileOptions(Nhwc: true, InputShapes: shapes.Skip(1).ToArray());
+                foreach (string engine in args[5].Split(','))
+                {
+                    var sw = Stopwatch.StartNew();
+                    (Func<int, Span<float>> input, Action run, Func<float[]> output, IDisposable s) = engine switch
+                    {
+                        "cpu" => Cpu(),
+                        "vulkan" => Vk(),
+                        "metal" => Mtl(),
+                        _ => throw new ArgumentException(engine),
+                    };
+                    double setup = sw.Elapsed.TotalMilliseconds;
+                    for (int k = 0; k < ins.Length; k++) ins[k].CopyTo(input(k));
+                    run();
+                    float[] got = output();
+                    var times = new List<double>();
+                    for (int i = 0; i < iters; i++)
+                    {
+                        for (int k = 0; k < ins.Length; k++) ins[k].CopyTo(input(k));
+                        long t0 = Stopwatch.GetTimestamp();
+                        run();
+                        times.Add(Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
+                    }
+                    double maxd = 0, sum = 0, se = 0;
+                    for (int i = 0; i < want.Length; i++)
+                    {
+                        double d = Math.Abs(got[i] - want[i]);
+                        maxd = Math.Max(maxd, d); sum += d; se += d * d;
+                    }
+                    double mse = se / want.Length, psnr = 10 * Math.Log10(1.0 / Math.Max(mse, 1e-20));
+                    times.Sort();
+                    Console.WriteLine($"{engine,-7} setup {setup,7:F1} ms  median {times[times.Count / 2],8:F2} ms  min {times[0],8:F2} ms  " +
+                        $"max|d| {maxd:E2} mean|d| {sum / want.Length:E2} psnr-vs-ref {psnr:F1} dB  peakWS {Process.GetCurrentProcess().PeakWorkingSet64 / 1048576} MB");
+                    s.Dispose();
+                }
+                break;
+
+                (Func<int, Span<float>>, Action, Func<float[]>, IDisposable) Cpu()
+                {
+                    var s = new InferenceSession(GraphCompiler.Compile(model, shapes[0], opt)) { Threads = threads };
+                    return (k => s.GetInput(k), s.Run, () => s.Output.ToArray(), s);
+                }
+                (Func<int, Span<float>>, Action, Func<float[]>, IDisposable) Vk()
+                {
+                    var s = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default.NewSession(model, shapes[0], opt);
+                    return (k => s.GetInput(k), s.Run, () => s.Output.ToArray(), s);
+                }
+                (Func<int, Span<float>>, Action, Func<float[]>, IDisposable) Mtl()
+                {
+                    var s = Sdcb.SimdOnnx.Backends.Metal.MetalBackend.Default.NewSession(model, shapes[0], opt);
+                    return (k => s.GetInput(k), s.Run, () => s.Output.ToArray(), s);
+                }
+            }
             case "runalloc":
             {
                 // managed bytes allocated per CPU run at a fixed shape: micro runalloc <model.onnx> NxCxHxW [threads]

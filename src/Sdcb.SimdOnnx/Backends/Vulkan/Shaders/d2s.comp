@@ -1,0 +1,23 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// NHWC DepthToSpace: output (n, y, x, c) reads input (n, y / b, x / b, ch) with
+// ch = c b^2 + (y % b) b + x % b (CRD) or ((y % b) b + x % b) oc + c (DCR).
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
+
+layout(push_constant) uniform PC { uint total, oc, oh, ow, ih, iw, b, crd; } p;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u + gl_GlobalInvocationID.x;
+    if (id >= p.total) return;
+    uint c = id % p.oc, px = id / p.oc;
+    uint xo = px % p.ow, r = px / p.ow, y = r % p.oh, n = r / p.oh;
+    uint sub = (y % p.b) * p.b + xo % p.b;
+    uint ch = p.crd != 0u ? c * p.b * p.b + sub : sub * p.oc + c;
+    uint ic = p.oc * p.b * p.b;
+    o[id] = x[((n * p.ih + y / p.b) * p.iw + xo / p.b) * ic + ch];
+}

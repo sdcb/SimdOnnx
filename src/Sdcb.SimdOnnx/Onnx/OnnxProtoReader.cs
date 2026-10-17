@@ -161,7 +161,7 @@ internal static class OnnxProtoReader
                 {
                     var nested = reader.EnterMessage();
                     OnnxTensorData tensor = new();
-                    ParseTensor(ref nested, tensor);
+                    ParseTensor(ref nested, tensor, requireName: false);
                     nested.EnsureFullyConsumed();
                     result.Tensor = tensor;
                     break;
@@ -188,7 +188,7 @@ internal static class OnnxProtoReader
         }
     }
 
-    private static void ParseTensor(ref ProtoReader reader, OnnxTensorData result)
+    private static void ParseTensor(ref ProtoReader reader, OnnxTensorData result, bool requireName = true)
     {
         while (reader.TryReadTag(out int field, out int wire))
         {
@@ -249,7 +249,8 @@ internal static class OnnxProtoReader
                 default: reader.Skip(wire); break;
             }
         }
-        if (result.Name.Length == 0) throw new InvalidDataException("ONNX TensorProto has no name.");
+        // initializers are looked up by name; a Constant node's value tensor is named by its output (exporters leave it empty)
+        if (requireName && result.Name.Length == 0) throw new InvalidDataException("ONNX TensorProto has no name.");
     }
 
     private static void ParseValueInfo(ref ProtoReader reader, OnnxValueInfoData result)

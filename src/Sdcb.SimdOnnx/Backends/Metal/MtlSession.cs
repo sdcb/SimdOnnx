@@ -18,6 +18,7 @@ public sealed unsafe class MtlInferenceSession : IDisposable
     private readonly float[] _inHost, _outHost;
     private readonly ulong _inOff, _outOff;
     private readonly int _inFloats, _outFloats;
+    private readonly long[] _inSub;       // each input's element offset into the staged region
     internal int Es => _graph.Es;         // bytes per stored element (2 = fp16)
 
     internal MtlInferenceSession(MtlDevice dev, ExecPlan plan, MtlGraphModel graph)
@@ -28,9 +29,11 @@ public sealed unsafe class MtlInferenceSession : IDisposable
         _graph.Acquire();
 
         Arena = dev.NewBuffer((nuint)((ulong)plan.ArenaFloats * (ulong)Es + 64));
-        _inFloats = checked((int)plan.Values[plan.InputValue].ElementCount);
+        // every graph input is staged as one region (inputs are planned back to back)
+        (long inFirst, long inCount, _inSub) = plan.InputRegion();
+        _inFloats = checked((int)inCount);
         _outFloats = checked((int)plan.Values[plan.OutputValue].ElementCount);
-        _inOff = (ulong)plan.BufOffset[plan.Values[plan.InputValue].Buf] * (ulong)Es;
+        _inOff = (ulong)inFirst * (ulong)Es;
         _outOff = (ulong)plan.BufOffset[plan.Values[plan.OutputValue].Buf] * (ulong)Es;
         _inHost = new float[_inFloats];
         _outHost = new float[_outFloats];
@@ -51,7 +54,14 @@ public sealed unsafe class MtlInferenceSession : IDisposable
     public int[] OutputShape => _plan.Values[_plan.OutputValue].Shape;
 
     /// <summary>The writable input window (staged into the arena on <see cref="Run"/>).</summary>
-    public Span<float> Input => _inHost;
+    public Span<float> Input => GetInput(0);
+    /// <summary>Number of graph inputs.</summary>
+    public int InputCount => _inSub.Length;
+    /// <summary>The writable window of graph input <paramref name="index"/> (graph order).</summary>
+    public Span<float> GetInput(int index) =>
+        _inHost.AsSpan(checked((int)_inSub[index]), checked((int)_plan.Values[_plan.Inputs[index]].ElementCount));
+    /// <summary>Logical shape of graph input <paramref name="index"/>.</summary>
+    public int[] GetInputShape(int index) => _plan.Values[_plan.Inputs[index]].Shape;
     /// <summary>The output tensor after <see cref="Run"/>.</summary>
     public ReadOnlySpan<float> Output => _outHost;
 

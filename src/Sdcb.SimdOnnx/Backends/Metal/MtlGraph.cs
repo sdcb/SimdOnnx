@@ -663,6 +663,23 @@ public sealed class MtlGraphModel : IDisposable
             {
                 // only planner relayouts reach here; the perm is physical
                 var p = (TransposeP)n.P!;
+                if (shapeIn(0).Length > 4)
+                {
+                    int r = shapeIn(0).Length;
+                    if (r > 6) throw new NotSupportedException($"Metal: transpose rank {r} > 6");
+                    int[] is6 = new int[6], os6 = new int[6], p6 = [0, 1, 2, 3, 4, 5];
+                    Array.Fill(is6, 1); Array.Fill(os6, 1);
+                    shapeIn(0).CopyTo(is6, 6 - r); shapeOut().CopyTo(os6, 6 - r);
+                    for (int i = 0; i < r; i++) p6[i + 6 - r] = p.Perm[i] + 6 - r;
+                    int[] ost = new int[6], ist = new int[6];
+                    ost[5] = ist[5] = 1;
+                    for (int i = 4; i >= 0; i--) { ost[i] = ost[i + 1] * os6[i + 1]; ist[i] = ist[i + 1] * is6[i + 1]; }
+                    yield return ND("transpose6", [Bind(n.In[0]), Bind(n.Out[0])],
+                        PcOf(U(nOut(), ost[0], ost[1], ost[2], ost[3], ost[4],
+                            ist[p6[0]], ist[p6[1]], ist[p6[2]], ist[p6[3]], ist[p6[4]], ist[p6[5]])),
+                        G((uint)nOut()));
+                    break;
+                }
                 int[] is4 = Pad4(shapeIn(0));
                 int[] os4 = Pad4(shapeOut());
                 int[] ostr = Strides(os4), istr = Strides(is4);
@@ -671,6 +688,29 @@ public sealed class MtlGraphModel : IDisposable
                     PcOf(U(nOut(), ostr[0], ostr[1], ostr[2],
                         istr[perm4[0]], istr[perm4[1]], istr[perm4[2]], istr[perm4[3]])),
                     G((uint)nOut()));
+                break;
+            }
+
+            case ExecOp.LeakyRelu or ExecOp.Tanh or ExecOp.Clip:
+            {
+                (uint mode, float a, float b) = n.P switch
+                {
+                    LeakyReluP lp => (0u, lp.Alpha, 0f),
+                    ClipP cp => (2u, cp.Min, cp.Max),
+                    _ => (1u, 0f, 0f),
+                };
+                yield return ND("unary2", [Bind(n.In[0]), Bind(n.Out[0])], PcOfF([(uint)nOut(), mode], a, b), G((uint)nOut()));
+                break;
+            }
+
+            case ExecOp.DepthToSpace:
+            {
+                var p = (DepthToSpaceP)n.P!;
+                RequireNhwc(n.In[0]); RequireNhwc(n.Out[0]);
+                int[] si = nhwcIn(0), so = nhwcOut();
+                yield return ND("d2s", [Bind(n.In[0]), Bind(n.Out[0])],
+                    PcOf((uint)nOut(), (uint)so[3], (uint)so[1], (uint)so[2], (uint)si[1], (uint)si[2], (uint)p.Block, p.Crd ? 1u : 0u),
+                    G((uint)nOut()), name: "d2s");
                 break;
             }
 

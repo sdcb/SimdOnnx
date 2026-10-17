@@ -938,6 +938,31 @@ public sealed class VkGraphModel : IDisposable
                 break;
             }
 
+            case ExecOp.LeakyRelu or ExecOp.Tanh or ExecOp.Clip:
+            {
+                (uint mode, float a, float b) = n.P switch
+                {
+                    LeakyReluP lp => (0u, lp.Alpha, 0f),
+                    ClipP cp => (2u, cp.Min, cp.Max),
+                    _ => (1u, 0f, 0f),
+                };
+                (uint ux, uint uy) = G2((uint)nOut());
+                output.Add(ND("unary2", [Bind(n.In[0]), Bind(n.Out[0])], PcOfF([(uint)nOut(), mode], a, b), ux, uy));
+                break;
+            }
+
+            case ExecOp.DepthToSpace:
+            {
+                var p = (DepthToSpaceP)n.P!;
+                RequireNhwc(n.In[0]); RequireNhwc(n.Out[0]);
+                int[] si = nhwcIn(0), so = nhwcOut();
+                (uint dx, uint dy) = G2((uint)nOut());
+                output.Add(ND("d2s", [Bind(n.In[0]), Bind(n.Out[0])],
+                    PcOf((uint)nOut(), (uint)so[3], (uint)so[1], (uint)so[2], (uint)si[1], (uint)si[2], (uint)p.Block, p.Crd ? 1u : 0u),
+                    dx, dy, name: "d2s"));
+                break;
+            }
+
             case ExecOp.HardSwish or ExecOp.Swish:
                 output.Add(ND("unary", [Bind(n.In[0]), Bind(n.Out[0])],
                     PcOf((uint)nOut(), n.Op == ExecOp.HardSwish ? 5u : 6u), G((uint)nOut())));

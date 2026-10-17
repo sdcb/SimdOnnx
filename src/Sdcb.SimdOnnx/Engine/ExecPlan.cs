@@ -32,6 +32,10 @@ public enum ExecOp
     Ext,             // consumer-registered operator (ExecNode.Ext)
     ChannelGate,     // squeeze-excitation gate: GAP -> 1x1 conv (+act) -> 1x1 conv -> (hard) sigmoid, [N,C,1,1]
     Attention,       // softmax(scale * q k^T) v over strided q / k / v views (GPU plans)
+    LeakyRelu,       // x >= 0 ? x : alpha * x (LeakyReluP)
+    Tanh,
+    Clip,            // clamp(x, min, max) (ClipP)
+    DepthToSpace,    // NCHW [N, C*b*b, H, W] -> [N, C, H*b, W*b] (DepthToSpaceP)
 }
 
 public enum ActivationKind { None, Relu, Sigmoid, Gelu, HardSwish, Swish }
@@ -113,6 +117,23 @@ public sealed class ResizeNearestP
     public required float[] Scales;
     // optional same-shape addend in In[1] (NHWC plans): out = resize(x) + [relu](In[1])
     public bool AddRelu;
+}
+
+public sealed class LeakyReluP
+{
+    public float Alpha = 0.01f;
+}
+
+public sealed class ClipP
+{
+    public float Min = float.NegativeInfinity, Max = float.PositiveInfinity;
+}
+
+public sealed class DepthToSpaceP
+{
+    public int Block;
+    /// <summary>CRD: input channel c·b² + i·b + j feeds output (c, h·b + i, w·b + j); DCR: (i·b + j)·C + c.</summary>
+    public bool Crd;
 }
 
 /// <summary>
@@ -255,6 +276,9 @@ public sealed class ExecPlan
     public required int[] BufOffset;    // arena offset per buffer
     public required int ArenaFloats;
     public required int InputValue;
+    /// <summary>Every graph input, in graph order (InputValues[0] == InputValue); their buffers sit back to
+    /// back in input order at the start of the input region.</summary>
+    public int[] InputValues = [];
     public required int OutputValue;
     /// <summary>Rank-4 activations stored channels-last (layout pass ran).</summary>
     public bool Nhwc;
@@ -262,6 +286,26 @@ public sealed class ExecPlan
     public bool PhysicalIo;
     /// <summary>The options the plan was compiled with (backend kernel choices read them).</summary>
     public CompileOptions? Options;
+
+    /// <summary>Graph inputs, in graph order (plans built before multi-input support: the one input).</summary>
+    internal int[] Inputs => InputValues.Length > 0 ? InputValues : [InputValue];
+
+    /// <summary>Arena span [first, end) in elements holding every input (input buffers are planned back to
+    /// back, input 0 first) and each input's element offset into it.</summary>
+    internal (long first, long count, long[] offsets) InputRegion()
+    {
+        int[] ins = Inputs;
+        long first = BufOffset[Values[ins[0]].Buf], end = first;
+        var offs = new long[ins.Length];
+        for (int k = 0; k < ins.Length; k++)
+        {
+            long o = BufOffset[Values[ins[k]].Buf];
+            if (o < first) throw new InvalidOperationException("graph inputs are not laid out in input order");
+            offs[k] = o - first;
+            end = Math.Max(end, o + Values[ins[k]].ElementCount);
+        }
+        return (first, end - first, offs);
+    }
 }
 
 /// <summary>Backend a plan is compiled for (fusions are restricted to what it implements).</summary>
@@ -274,8 +318,11 @@ public enum PlanTarget { Cpu, Vulkan, Metal }
 /// <param name="OutputName">tensor to stop at instead of the graph output (nodes it does not need are dropped).</param>
 public sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool MemFuse = true,
     PlanTarget Target = PlanTarget.Cpu, EngineExtensions? Extensions = null, string? OutputName = null,
-    bool LogicalOutput = false, bool Fuse = true, bool StagedCoopConv = false, bool? Vec4Eltwise = null)
+    bool LogicalOutput = false, bool Fuse = true, bool StagedCoopConv = false, bool? Vec4Eltwise = null,
+    IReadOnlyList<int[]?>? InputShapes = null)
 {
+    // InputShapes: shapes of the graph inputs after the first (null / missing: the model's static
+    // dims). Compared by reference in backend graph caches: reuse one options instance per shape set.
     // Vec4Eltwise: GPU maxpool / bilinear / depthwise take 4 channels per invocation when c % 4 == 0.
     // null = the device default (VkDevice.Vec4Eltwise: integrated and Intel GPUs); true everywhere
     // matches the old OCR engine, which used the vec4 kernels on every device.

@@ -76,6 +76,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
     private readonly IntPtr[] _descSets;  // per-dispatch sets when !PushDescriptors
     private readonly ulong _inOff, _outOff;
     private readonly int _inFloats, _outFloats;
+    private readonly long[] _inSub;       // each input's element offset into the staged region
     private readonly int _es;             // bytes per stored element (2 = fp16 storage)
     internal bool F16 => _es == 2;
 
@@ -87,9 +88,11 @@ public sealed unsafe class VkInferenceSession : IDisposable
         _graph.Acquire();
         _es = graph.Es;
 
-        _inFloats = checked((int)plan.Values[plan.InputValue].ElementCount);
+        // every graph input is staged as one region (inputs are planned back to back)
+        (long inFirst, long inCount, _inSub) = plan.InputRegion();
+        _inFloats = checked((int)inCount);
         _outFloats = checked((int)plan.Values[plan.OutputValue].ElementCount);
-        _inOff = (ulong)plan.BufOffset[plan.Values[plan.InputValue].Buf] * (ulong)_es;
+        _inOff = (ulong)inFirst * (ulong)_es;
         _outOff = (ulong)plan.BufOffset[plan.Values[plan.OutputValue].Buf] * (ulong)_es;
         if (shared is not null)
         {
@@ -158,7 +161,14 @@ public sealed unsafe class VkInferenceSession : IDisposable
 
     /// <summary>The writable input window: the mapped fp32 staging buffer itself (no host copy).
     /// Do not write it between <see cref="Submit"/> and <see cref="Wait"/>.</summary>
-    public Span<float> Input => new(_stageInMap, _inFloats);
+    public Span<float> Input => GetInput(0);
+    /// <summary>Number of graph inputs.</summary>
+    public int InputCount => _inSub.Length;
+    /// <summary>The writable staging window of graph input <paramref name="index"/> (graph order).</summary>
+    public Span<float> GetInput(int index) =>
+        new(_stageInMap + _inSub[index], checked((int)_plan.Values[_plan.Inputs[index]].ElementCount));
+    /// <summary>Logical shape of graph input <paramref name="index"/>.</summary>
+    public int[] GetInputShape(int index) => _plan.Values[_plan.Inputs[index]].Shape;
     /// <summary>The output tensor after <see cref="Run"/> (the mapped staging buffer; valid until the next run).</summary>
     public ReadOnlySpan<float> Output => new(_stageOutMap, _outFloats);
 
@@ -500,7 +510,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
     /// <summary>Debug/test: copy host input into the arena's input region.</summary>
     internal void DebugUploadInput()
     {
-        float[] host = Input.ToArray();
+        float[] host = new Span<float>(_stageInMap, _inFloats).ToArray();
         ToStorage(host, _stageInMap, F16);
         _stageIn.Flush(0, InputBytes);
         IntPtr cmd = _dev.NewCommandBuffer();
@@ -514,7 +524,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
         _dev.WaitFence(fence);
         _dev.DestroyFence(fence);
         _dev.FreeCommandBuffer(cmd);
-        host.CopyTo(Input);
+        host.CopyTo(new Span<float>(_stageInMap, _inFloats));
     }
 
     /// <summary>Copy host input into staging and run the recorded pipeline.</summary>

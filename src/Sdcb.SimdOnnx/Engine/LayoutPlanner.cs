@@ -44,15 +44,18 @@ public sealed class LayoutPlanner
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     public static void Run(List<ExecNode> nodes, List<CValue> values, List<int> bufSize,
-        int inputValue, ref int outputValue, bool physicalIn, bool physicalOut)
+        int[] inputValues, ref int outputValue, bool physicalIn, bool physicalOut)
     {
         // streamed: relayouts land before the node being planned, dissolved transposes are dropped
         // (one pass, no Insert / RemoveAt shifting the list)
         ExecNode[] input = nodes.ToArray();
         nodes.Clear();
         var lp = new LayoutPlanner(nodes, values, bufSize);
-        CValue inV = values[inputValue];
-        inV.Layout = physicalIn && inV.Shape.Length == 4 ? Layout.Nhwc : Layout.Identity(inV.Shape.Length);
+        foreach (int inputValue in inputValues)
+        {
+            CValue inV = values[inputValue];
+            inV.Layout = physicalIn && inV.Shape.Length == 4 ? Layout.Nhwc : Layout.Identity(inV.Shape.Length);
+        }
 
         foreach (ExecNode n in input)
         {
@@ -172,7 +175,7 @@ public sealed class LayoutPlanner
                 break;
             }
             case ExecOp.Conv or ExecOp.MaxPool or ExecOp.ResizeBilinear or ExecOp.Pad
-                or ExecOp.GlobalAvgPool or ExecOp.ConvTranspose or ExecOp.ResizeNearest or ExecOp.AvgPool:
+                or ExecOp.GlobalAvgPool or ExecOp.ConvTranspose or ExecOp.ResizeNearest or ExecOp.AvgPool or ExecOp.DepthToSpace:
             {
                 if (_values[n.In[0]].Shape.Length != 4 || _values[n.Out[0]].Shape.Length != 4)
                     throw new NotSupportedException($"layout: {n.Op} '{n.Name}' is not rank-4.");
@@ -241,7 +244,7 @@ public sealed class LayoutPlanner
                 break;
             }
             case ExecOp.Relu or ExecOp.Sigmoid or ExecOp.Erf or ExecOp.Gelu or ExecOp.Copy or ExecOp.HardSigmoid or ExecOp.Sqrt
-                or ExecOp.HardSwish or ExecOp.Swish:
+                or ExecOp.HardSwish or ExecOp.Swish or ExecOp.LeakyRelu or ExecOp.Tanh or ExecOp.Clip:
                 SetOut(n, L(n.In[0]));
                 break;
             case ExecOp.Slice:

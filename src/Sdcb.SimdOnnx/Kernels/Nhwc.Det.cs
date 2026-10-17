@@ -204,6 +204,45 @@ internal static unsafe partial class Nhwc
     }
 
     /// <summary>
+    /// DepthToSpace of one image, <paramref name="nhwc"/> storage or NCHW planes: output (c, y, x) reads input
+    /// channel c·b² + (y % b)·b + x % b (CRD) or ((y % b)·b + x % b)·oc + c (DCR) at (y / b, x / b).
+    /// </summary>
+    public static void DepthToSpace(ReadOnlySpan<float> src, int ih, int iw, int ic, Span<float> dst, int b, bool crd, bool nhwc)
+    {
+        int oc = ic / (b * b), oh = ih * b, ow = iw * b;
+        fixed (float* sp0 = src, dp0 = dst)
+        {
+            float* sp = sp0, dp = dp0;
+            For(oh, (long)oh * ow * oc, y =>
+            {
+                int sy = y / b, dy = y % b;
+                if (nhwc)
+                {
+                    float* orow = dp + (long)y * ow * oc;
+                    for (int x = 0; x < ow; x++)
+                    {
+                        float* s = sp + ((long)sy * iw + x / b) * ic;
+                        float* o = orow + (long)x * oc;
+                        int sub = dy * b + x % b;
+                        if (!crd) Copy(s + (long)sub * oc, o, oc);
+                        else for (int c = 0; c < oc; c++) o[c] = s[c * b * b + sub];
+                    }
+                    return;
+                }
+                for (int c = 0; c < oc; c++)
+                {
+                    float* orow = dp + ((long)c * oh + y) * ow;
+                    for (int x = 0; x < ow; x++)
+                    {
+                        int sub = dy * b + x % b, ch = crd ? c * b * b + sub : sub * oc + c;
+                        orow[x] = sp[((long)ch * ih + sy) * iw + x / b];
+                    }
+                }
+            });
+        }
+    }
+
+    /// <summary>
     /// Squeeze-excitation gate of one image (<see cref="ExecOp.ChannelGate"/>): channel means of the NHWC
     /// image (<paramref name="nhwc"/>) or of its NCHW planes, then the two small fully connected layers.
     /// </summary>

@@ -82,30 +82,62 @@ internal static unsafe class Act
 
     public static void ApplyErf(float* s, float* d, long n) => Split<Erf>(s, d, n);
 
-    private static void Split<T>(float* s, float* d, long n) where T : struct, IAct
+    private static void Split<T>(float* s, float* d, long n, T op = default) where T : struct, IAct
     {
         int k = n < ParallelMin ? 1 : (int)Math.Min(Par.Threads, Math.Max(1, n / (ParallelMin / 2)));
-        if (k == 1) { Run<T>(s, d, n); return; }
+        if (k == 1) { Run(s, d, n, op); return; }
         nint ps = (nint)s, pd = (nint)d;
         long step = (n / k + 15) & ~15L;
         Par.For(0, k, t =>
         {
             long i0 = t * step, len = Math.Min(n - i0, step);
-            if (len > 0) Run<T>((float*)ps + i0, (float*)pd + i0, len);
+            if (len > 0) Run((float*)ps + i0, (float*)pd + i0, len, op);
         });
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    private static void Run<T>(float* s, float* d, long n) where T : struct, IAct
+    private static void Run<T>(float* s, float* d, long n, T op) where T : struct, IAct
     {
         long i = 0;
         if (Vector256.IsHardwareAccelerated)
-            for (; i + 8 <= n; i += 8) default(T).V(Vector256.Load(s + i)).Store(d + i);
+            for (; i + 8 <= n; i += 8) op.V(Vector256.Load(s + i)).Store(d + i);
         else if (Vector128.IsHardwareAccelerated)
-            for (; i + 4 <= n; i += 4) default(T).V(Vector128.Load(s + i)).Store(d + i);
+            for (; i + 4 <= n; i += 4) op.V(Vector128.Load(s + i)).Store(d + i);
         else if (Vector.IsHardwareAccelerated)
             for (int vl = Vector<float>.Count; i + vl <= n; i += vl)
-                Unsafe.WriteUnaligned(d + i, default(T).V(Unsafe.ReadUnaligned<Vector<float>>(s + i)));
-        for (; i < n; i++) d[i] = default(T).S(s[i]);
+                Unsafe.WriteUnaligned(d + i, op.V(Unsafe.ReadUnaligned<Vector<float>>(s + i)));
+        for (; i < n; i++) d[i] = op.S(s[i]);
+    }
+
+    /// <summary>x &gt;= 0 ? x : alpha·x.</summary>
+    public static void ApplyLeakyRelu(float* s, float* d, long n, float alpha) => Split(s, d, n, new Leaky(alpha));
+    public static void ApplyTanh(float* s, float* d, long n) => Split<Tanh>(s, d, n);
+    public static void ApplyClip(float* s, float* d, long n, float min, float max) => Split(s, d, n, new Clip(min, max));
+
+    private readonly struct Leaky(float alpha) : IAct
+    {
+        private readonly float _a = alpha;
+        private readonly bool _max = alpha <= 1f;   // x >= 0 ? x : a·x == max(x, a·x) when a <= 1, min(x, a·x) when a > 1
+        public Vector<float> V(Vector<float> x) => _max ? Vector.Max(x, x * new Vector<float>(_a)) : Vector.Min(x, x * new Vector<float>(_a));
+        public Vector256<float> V(Vector256<float> x) => _max ? Vector256.Max(x, x * Vector256.Create(_a)) : Vector256.Min(x, x * Vector256.Create(_a));
+        public Vector128<float> V(Vector128<float> x) => _max ? Vector128.Max(x, x * Vector128.Create(_a)) : Vector128.Min(x, x * Vector128.Create(_a));
+        public float S(float x) => x < 0f ? x * _a : x;
+    }
+    // tanh(x) = 2·sigmoid(2x) - 1
+    private struct Tanh : IAct
+    {
+        public Vector<float> V(Vector<float> x) => SimdMath.SigmoidV(x + x) * new Vector<float>(2f) - Vector<float>.One;
+        public Vector256<float> V(Vector256<float> x) => SimdMath.SigmoidCore(x + x) * Vector256.Create(2f) - Vector256<float>.One;
+        public Vector128<float> V(Vector128<float> x) =>
+            (PackedSimd.IsSupported ? SimdMath.SigmoidPk(x + x) : SimdMath.SigmoidCore(x + x)) * Vector128.Create(2f) - Vector128<float>.One;
+        public float S(float x) => MathF.Tanh(x);
+    }
+    private readonly struct Clip(float min, float max) : IAct
+    {
+        private readonly float _lo = min, _hi = max;
+        public Vector<float> V(Vector<float> x) => Vector.Min(Vector.Max(x, new Vector<float>(_lo)), new Vector<float>(_hi));
+        public Vector256<float> V(Vector256<float> x) => Vector256.Min(Vector256.Max(x, Vector256.Create(_lo)), Vector256.Create(_hi));
+        public Vector128<float> V(Vector128<float> x) => Vector128.Min(Vector128.Max(x, Vector128.Create(_lo)), Vector128.Create(_hi));
+        public float S(float x) => MathF.Min(MathF.Max(x, _lo), _hi);
     }
 }

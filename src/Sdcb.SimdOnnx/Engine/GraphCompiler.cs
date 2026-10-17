@@ -39,6 +39,7 @@ internal static class GraphCompiler
         private readonly List<ExecNode> _nodes = [];
         private readonly List<int> _bufSize = [];
         private int _inputValue = -1;
+        private readonly List<int> _inputValues = [];
 
         public Compiler(OnnxModel m) => _m = m;
 
@@ -117,15 +118,24 @@ internal static class GraphCompiler
                 else
                     AddValue(new CValue { Name = t.Name, Shape = dims, DType = t.DataType, Ints = t.AsInt64s() });
             }
-            if (g.Inputs.Count != 1) throw new NotSupportedException("Expected single graph input.");
+            // graph inputs (some exporters also list the initializers there): the first takes inputShape,
+            // the others CompileOptions.InputShapes or their static dims from the model
+            var inputs = g.Inputs.Where(i => !_byName.ContainsKey(i.Name)).ToList();
+            if (inputs.Count == 0) throw new NotSupportedException("The graph has no input.");
+            for (int k = 0; k < inputs.Count; k++)
             {
-                string inName = g.Inputs[0].Name;
+                int[] shape;
+                if (k == 0) shape = inputShape.ToArray();
+                else if (opt.InputShapes is { } given && given.Count >= k && given[k - 1] is { } gs) shape = (int[])gs.Clone();
+                else if (inputs[k].Shape is { } ms && ms.All(d => d > 0)) shape = ms;
+                else throw new ArgumentException(
+                    $"Graph input '{inputs[k].Name}' has dynamic dims: pass its shape in CompileOptions.InputShapes.", nameof(opt));
                 int elems = 1;
-                int[] shape = inputShape.ToArray();
                 foreach (int d in shape) elems *= d;
                 int buf = NewBuf(elems);
-                _inputValue = AddValue(new CValue { Name = inName, Shape = shape, DType = 1, Buf = buf });
+                _inputValues.Add(AddValue(new CValue { Name = inputs[k].Name, Shape = shape, DType = 1, Buf = buf }));
             }
+            _inputValue = _inputValues[0];
 
             for (int ni = 0; ni < g.Nodes.Count; ni++)
             {
@@ -139,19 +149,20 @@ internal static class GraphCompiler
             {
                 if (!_byName.TryGetValue(outName, out int ov))
                     throw new ArgumentException($"Tensor '{outName}' is not produced by the graph.", nameof(opt));
-                return FuseAndPlan(_m, _nodes, _values, _bufSize, _inputValue, ov, opt);
+                return FuseAndPlan(_m, _nodes, _values, _bufSize, [.. _inputValues], ov, opt);
             }
             if (g.Outputs.Count != 1) throw new NotSupportedException("Expected single graph output.");
             int outputValue = _byName[g.Outputs[0].Name];
 
-            return FuseAndPlan(_m, _nodes, _values, _bufSize, _inputValue, outputValue, opt);
+            return FuseAndPlan(_m, _nodes, _values, _bufSize, [.. _inputValues], outputValue, opt);
         }
 
         // ---------- fusion + buffer planning ----------
         [MethodImpl(MethodImplCompat.AggressiveOptimization)]
         private static ExecPlan FuseAndPlan(OnnxModel model, List<ExecNode> nodes, List<CValue> values,
-            List<int> bufSize, int inputValue, int outputValue, CompileOptions opt)
+            List<int> bufSize, int[] inputValues, int outputValue, CompileOptions opt)
         {
+            int inputValue = inputValues[0];
             // fusion passes operate on the logical graph and are layout-blind;
             // physical layout is decided afterwards by LayoutPlanner
             Prune(nodes, values, outputValue);
@@ -165,7 +176,7 @@ internal static class GraphCompiler
                     FuseResizeAdd(nodes, values, outputValue);
             }
             if (opt.Nhwc)
-                LayoutPlanner.Run(nodes, values, bufSize, inputValue, ref outputValue, opt.PhysicalIo,
+                LayoutPlanner.Run(nodes, values, bufSize, inputValues, ref outputValue, opt.PhysicalIo,
                     opt.PhysicalIo && !opt.LogicalOutput);
             if (opt.Nhwc && opt.MemFuse && CompileOptions.MemFusions && fuse)
             {
@@ -173,7 +184,7 @@ internal static class GraphCompiler
                 FuseMemory(nodes, values, outputValue, opt.Gpu);
             }
 
-            PlanArena(nodes, values, bufSize, inputValue, outputValue,
+            PlanArena(nodes, values, bufSize, inputValues, outputValue,
                 out int[] offsets, out int arenaFloats);
             if (Env.Flag("DUMP") == "2")
             {
@@ -207,6 +218,7 @@ internal static class GraphCompiler
                 BufOffset = offsets,
                 ArenaFloats = arenaFloats,
                 InputValue = inputValue,
+                InputValues = inputValues,
                 OutputValue = outputValue,
                 Nhwc = opt.Nhwc,
                 PhysicalIo = opt.Nhwc && opt.PhysicalIo,
@@ -1166,9 +1178,10 @@ internal static class GraphCompiler
         /// <summary>Lifetime-based arena packing (def-order, free-list reuse).</summary>
         [MethodImpl(MethodImplCompat.AggressiveOptimization)]
         private static void PlanArena(List<ExecNode> nodes, List<CValue> values,
-            List<int> bufSize, int inputValue, int outputValue,
+            List<int> bufSize, int[] inputValues, int outputValue,
             out int[] offsets, out int arenaFloats)
         {
+            int inputValue = inputValues[0];
             int bufCount = bufSize.Count;
             // 32 floats: 128 B in fp32, 64 B in fp16 — GPU arena offsets bind as storage-buffer descriptors,
             // which must honour minStorageBufferOffsetAlignment (64 B on most desktop GPUs)
@@ -1199,15 +1212,22 @@ internal static class GraphCompiler
             }
             int inputBuf = values[inputValue].Buf;
             int outputBuf = values[outputValue].Buf;
-            def[inputBuf] = -1;
-            // keep input + output live for the whole run: callers may read
-            // Input (e.g. two-stage pipelines reusing it) after Run().
-            use[inputBuf] = nodes.Count;
+            // inputs, in input order, are placed first and back to back: GPU sessions stage them as one region
+            int[] inRank = Enumerable.Repeat(int.MaxValue, bufCount).ToArray();
+            for (int k = 0; k < inputValues.Length; k++)
+            {
+                int ib = values[inputValues[k]].Buf;
+                inRank[ib] = k;
+                def[ib] = -1;
+                // keep inputs + output live for the whole run: callers may read
+                // Input (e.g. two-stage pipelines reusing it) after Run().
+                use[ib] = nodes.Count;
+            }
             use[outputBuf] = nodes.Count;
 
             var order = Enumerable.Range(0, bufCount)
                 .Where(b => def[b] != int.MaxValue)
-                .OrderBy(b => def[b]).ThenByDescending(b => bufSize[b]).ToList();
+                .OrderBy(b => def[b]).ThenBy(b => inRank[b]).ThenByDescending(b => bufSize[b]).ToList();
             var active = new List<int>();   // placed buf ids still live
             var free = new List<(int off, int size)>();
             offsets = new int[bufCount];
@@ -1251,7 +1271,7 @@ internal static class GraphCompiler
             {
                 // the input (live for the whole run) goes first, at offset 0: pipelines can
                 // then stack another plan's arena right after it
-                var bySize = order.OrderByDescending(b => b == inputBuf).ThenByDescending(b => bufSize[b]).ThenBy(b => def[b]).ToList();
+                var bySize = order.OrderBy(b => inRank[b]).ThenByDescending(b => bufSize[b]).ThenBy(b => def[b]).ToList();
                 var placed = new List<int>(bySize.Count);
                 int[] off2 = new int[bufCount];
                 Array.Fill(off2, -1);
@@ -1390,6 +1410,13 @@ internal static class GraphCompiler
                 case "MatMul": EmitMatMul(n); break;
                 case "Softmax": EmitSoftmax(n); break;
                 case "Sqrt": EmitUnary(n, ExecOp.Sqrt); break;
+                case "Tanh": EmitUnary(n, ExecOp.Tanh); break;
+                case "LeakyRelu":
+                    Emit(ExecOp.LeakyRelu, [Input(0, n)], ActivationValue(n.Outputs[0], V(Input(0, n)).Shape),
+                        new LeakyReluP { Alpha = n.FloatAttr("alpha", 0.01f) }, n);
+                    break;
+                case "Clip": EmitClip(n); break;
+                case "DepthToSpace": EmitDepthToSpace(n); break;
                 case "Pow": EmitPow(n); break;
                 default:
                     throw new NotSupportedException($"Op '{op}' not supported (node '{n.Name}').");
@@ -1667,7 +1694,15 @@ internal static class GraphCompiler
             int rank = x.Shape.Length;
             long[] norm = axes.Select(a => a < 0 ? a + rank : a).OrderBy(a => a).ToArray();
             bool keep = n.IntAttr("keepdims", 1) == 1;
-            if (rank == 4 && norm.SequenceEqual([2L, 3L]) && keep) { EmitGlobalAvg(n); return; }
+            if (rank == 4 && norm.SequenceEqual([2L, 3L]))
+            {
+                if (keep) { EmitGlobalAvg(n); return; }
+                // keepdims = 0: the pooled [N,C,1,1] seen as [N,C] (zero-copy view)
+                int gap = Emit(ExecOp.GlobalAvgPool, [Input(0, n)],
+                    ActivationValue(n.Outputs[0] + "__gap", [x.Shape[0], x.Shape[1], 1, 1]), null, n);
+                AddValue(new CValue { Name = n.Outputs[0], Shape = [x.Shape[0], x.Shape[1]], DType = 1, Buf = V(gap).Buf, AliasOf = gap });
+                return;
+            }
             if (norm.Length != 1 || norm[0] != rank - 1)
                 throw new NotSupportedException($"ReduceMean '{n.Name}': axes [{string.Join(',', axes)}] (rank {rank}).");
             int[] shape = (int[])x.Shape.Clone();
@@ -1761,6 +1796,37 @@ internal static class GraphCompiler
             int biasV = n.Inputs.Count > 2 && n.Inputs[2].Length > 0 ? Input(2, n) : -1;
             Emit(ExecOp.ConvTranspose, [Input(0, n), Input(1, n)], ActivationValue(n.Outputs[0], outShape),
                 new ConvTP { Kernel = k, BiasValue = biasV }, n);
+        }
+
+        [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+        private void EmitClip(OnnxNodeData n)
+        {
+            CValue x = V(Input(0, n));
+            // opset >= 11: min / max as optional const inputs; older: attributes
+            float Bound(int i, string attr, float none)
+            {
+                if (n.Inputs.Count > i && n.Inputs[i].Length > 0)
+                    return V(Input(i, n)) is { Floats: [var f] } ? f
+                        : V(Input(i, n)) is { Ints: [var l] } ? l
+                        : throw new NotSupportedException($"Clip '{n.Name}': non-constant {attr}.");
+                return n.Attr(attr) is not null ? n.FloatAttr(attr, none) : none;
+            }
+            var p = new ClipP { Min = Bound(1, "min", float.NegativeInfinity), Max = Bound(2, "max", float.PositiveInfinity) };
+            Emit(ExecOp.Clip, [Input(0, n)], ActivationValue(n.Outputs[0], x.Shape), p, n);
+        }
+
+        [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+        private void EmitDepthToSpace(OnnxNodeData n)
+        {
+            CValue x = V(Input(0, n));
+            int b = (int)n.IntAttr("blocksize");
+            if (x.Shape.Length != 4 || b < 1 || x.Shape[1] % (b * b) != 0)
+                throw new NotSupportedException($"DepthToSpace '{n.Name}': needs rank 4 and C divisible by blocksize².");
+            string mode = n.StringAttr("mode", "DCR");
+            if (mode is not ("DCR" or "CRD")) throw new NotSupportedException($"DepthToSpace mode {mode}.");
+            int[] s = x.Shape;
+            Emit(ExecOp.DepthToSpace, [Input(0, n)], ActivationValue(n.Outputs[0], [s[0], s[1] / (b * b), s[2] * b, s[3] * b]),
+                new DepthToSpaceP { Block = b, Crd = mode == "CRD" }, n);
         }
 
         [MethodImpl(MethodImplCompat.AggressiveOptimization)]

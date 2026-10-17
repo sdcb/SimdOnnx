@@ -58,6 +58,14 @@ public sealed unsafe class InferenceSession : IDisposable
 
     /// <summary>The writable input window inside the arena (NCHW float).</summary>
     public Span<float> Input => GetSpan(_inputValue);
+    /// <summary>Number of graph inputs (<see cref="GetInput(int)"/>).</summary>
+    public int InputCount => _plan.Inputs.Length;
+    /// <summary>The writable window of graph input <paramref name="index"/> (graph order; 0 is <see cref="Input"/>).</summary>
+    public Span<float> GetInput(int index) => GetSpan(_plan.Inputs[index]);
+    /// <summary>Logical shape of graph input <paramref name="index"/>.</summary>
+    public int[] GetInputShape(int index) => _plan.Values[_plan.Inputs[index]].Shape;
+    /// <summary>Name of graph input <paramref name="index"/>.</summary>
+    public string GetInputName(int index) => _plan.Values[_plan.Inputs[index]].Name;
     /// <summary>The output tensor after <see cref="Run"/>.</summary>
     public ReadOnlySpan<float> Output => GetSpan(_outputValue);
 
@@ -167,6 +175,27 @@ public sealed unsafe class InferenceSession : IDisposable
             case ExecOp.Sqrt: Ops.Sqrt(GetIn(n.In[0]), GetSpan(n.Out[0])); break;
             case ExecOp.HardSwish: Ops.Activation(GetIn(n.In[0]), GetSpan(n.Out[0]), ActivationKind.HardSwish); break;
             case ExecOp.Swish: Ops.Activation(GetIn(n.In[0]), GetSpan(n.Out[0]), ActivationKind.Swish); break;
+            case ExecOp.LeakyRelu or ExecOp.Tanh or ExecOp.Clip:
+            {
+                ReadOnlySpan<float> s = GetIn(n.In[0]);
+                Span<float> d = GetSpan(n.Out[0]);
+                fixed (float* sp = s, dp = d)
+                {
+                    if (n.P is LeakyReluP lp) Act.ApplyLeakyRelu(sp, dp, s.Length, lp.Alpha);
+                    else if (n.P is ClipP cp) Act.ApplyClip(sp, dp, s.Length, cp.Min, cp.Max);
+                    else Act.ApplyTanh(sp, dp, s.Length);
+                }
+                break;
+            }
+            case ExecOp.DepthToSpace:
+            {
+                // NCHW plans (the NHWC path is in ExecNhwc)
+                var p = (DepthToSpaceP)n.P!;
+                int[] i = values[n.In[0]].Shape;
+                for (int b = 0; b < i[0]; b++)
+                    Nhwc.DepthToSpace(Img(n.In[0], b, i[0]), i[2], i[3], i[1], ImgOut(n.Out[0], b, i[0]), p.Block, p.Crd, nhwc: false);
+                break;
+            }
             case ExecOp.Softmax:
             {
                 int[] s = values[n.In[0]].Shape;
@@ -361,6 +390,14 @@ public sealed unsafe class InferenceSession : IDisposable
                 for (int b = 0; b < i[0]; b++)
                     Nhwc.ConvTranspose(Img(n.In[0], b, i[0]), i[1], i[2], i[3], ImgOut(n.Out[0], b, i[0]), o[3],
                         p.Kernel[0], p.Kernel[1], (ConvTPlan)p.KernelPlan!, p.Act);
+                return true;
+            }
+            case ExecOp.DepthToSpace:
+            {
+                var p = (DepthToSpaceP)n.P!;
+                int[] i = Nhwc4(values[n.In[0]]);
+                for (int b = 0; b < i[0]; b++)
+                    Nhwc.DepthToSpace(Img(n.In[0], b, i[0]), i[1], i[2], i[3], ImgOut(n.Out[0], b, i[0]), p.Block, p.Crd, nhwc: true);
                 return true;
             }
             case ExecOp.ResizeNearest:

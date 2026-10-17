@@ -79,6 +79,54 @@ kernel void transpose(device const half* x [[buffer(0)]],
     o[gid] = x[d0 * p.ps0 + d1 * p.ps1 + d2 * p.ps2 + d3 * p.ps3];
 }
 
+// ---- transpose6: rank 5-6 permute (pixel (un)shuffle relayouts) ----
+struct PcTranspose6 { uint n, os0, os1, os2, os3, os4, ps0, ps1, ps2, ps3, ps4, ps5; };
+kernel void transpose6(device const half* x [[buffer(0)]],
+                       device half* o [[buffer(1)]],
+                       constant PcTranspose6& p [[buffer(2)]],
+                       uint gid [[thread_position_in_grid]])
+{
+    if (gid >= p.n) return;
+    uint d0 = gid / p.os0, r = gid % p.os0;
+    uint d1 = r / p.os1; r %= p.os1;
+    uint d2 = r / p.os2; r %= p.os2;
+    uint d3 = r / p.os3; r %= p.os3;
+    uint d4 = r / p.os4, d5 = r % p.os4;
+    o[gid] = x[d0 * p.ps0 + d1 * p.ps1 + d2 * p.ps2 + d3 * p.ps3 + d4 * p.ps4 + d5 * p.ps5];
+}
+
+// ---- unary2: mode 0 leaky relu (x >= 0 ? x : a x), 1 tanh, 2 clip(x, a, b) ----
+struct PcUnary2 { uint n, mode; float a, b; };
+kernel void unary2(device const half* x [[buffer(0)]],
+                   device half* o [[buffer(1)]],
+                   constant PcUnary2& p [[buffer(2)]],
+                   uint gid [[thread_position_in_grid]])
+{
+    if (gid >= p.n) return;
+    float v = float(x[gid]);
+    float r;
+    if (p.mode == 0u) r = v >= 0.0f ? v : v * p.a;
+    else if (p.mode == 1u) r = precise::tanh(clamp(v, -15.0f, 15.0f));
+    else r = min(max(v, p.a), p.b);
+    o[gid] = half(r);
+}
+
+// ---- d2s: NHWC DepthToSpace (CRD: ch = c b^2 + (y % b) b + x % b; DCR: ((y % b) b + x % b) oc + c) ----
+struct PcD2s { uint total, oc, oh, ow, ih, iw, b, crd; };
+kernel void d2s(device const half* x [[buffer(0)]],
+                device half* o [[buffer(1)]],
+                constant PcD2s& p [[buffer(2)]],
+                uint gid [[thread_position_in_grid]])
+{
+    if (gid >= p.total) return;
+    uint c = gid % p.oc, px = gid / p.oc;
+    uint xo = px % p.ow, r = px / p.ow, y = r % p.oh, n = r / p.oh;
+    uint sub = (y % p.b) * p.b + xo % p.b;
+    uint ch = p.crd != 0u ? c * p.b * p.b + sub : sub * p.oc + c;
+    uint ic = p.oc * p.b * p.b;
+    o[gid] = x[((n * p.ih + y / p.b) * p.iw + xo / p.b) * ic + ch];
+}
+
 // ---- slice: rank<=4 strided slice ----
 struct PcSlice {
     uint n, os0, os1, os2;

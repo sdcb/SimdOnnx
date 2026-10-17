@@ -238,6 +238,86 @@ public class GpuOpTests
         Check(backend, OnnxModel.Load(model), [m, k], "gemm transB=1");
     }
 
+    [SkippableTheory]
+    [MemberData(nameof(Backends))]
+    public void DocGainOps_TwoInputs_MatchCpu(string backend)
+    {
+        // the ops a torch-exported image-enhancement net (DocGainNet) brings: two graph inputs (image +
+        // fixed-size thumbnail), LeakyRelu, 3·tanh(x/3), Clip, DepthToSpace (CRD and DCR), a pixel
+        // unshuffle through rank-6 reshape / transpose, ReduceMean(keepdims = 0) -> Gemm(transB) -> broadcast add
+        var rng = new Random(31);
+        int c = 8;
+        byte[] model = new OnnxBuilder().Input("x", 1, c, 10, 12).Input("t", 1, 4, 6, 6)
+            .Init("W1", Rand(rng, 16 * c * 9, 0.3f), 16, c, 3, 3).Init("B1", Rand(rng, 16, 0.3f), 16)
+            .Init("W2", Rand(rng, 64 * 16, 0.3f), 64, 16, 1, 1)
+            .Init("Wg", Rand(rng, 32 * 4, 0.5f), 32, 4).Init("Bg", Rand(rng, 32, 0.5f), 32)
+            .Init("third", [1f / 3f]).Init("three", [3f]).Init("lo", [-0.5f]).Init("hi", [0.7f])
+            .InitI64("ax3", [3], 1).InitI64("ax23", [2, 3], 2).InitI64("r1", [0, 0, -1, 2, 0], 5)
+            .InitI64("r2", [0, 0, 0, 0, -1, 2], 6).InitI64("r3", [0, -1, 1, 1, 0, 0], 6)
+            .Node("Conv", ["x", "W1", "B1"], ["c1"], ("kernel_shape", new[] { 3, 3 }), ("pads", new[] { 1, 1, 1, 1 }))
+            .Node("LeakyRelu", ["c1"], ["a1"], ("alpha", 0.2f))
+            .Node("Mul", ["a1", "third"], ["m1"]).Node("Tanh", ["m1"], ["th"]).Node("Mul", ["th", "three"], ["m2"])
+            .Node("Conv", ["m2", "W2"], ["c2"], ("kernel_shape", new[] { 1, 1 }))
+            .Node("DepthToSpace", ["c2"], ["d1"], ("blocksize", 2), ("mode", "CRD"))     // [1,16,20,24]
+            .Node("DepthToSpace", ["d1"], ["d2"], ("blocksize", 2), ("mode", "DCR"))     // [1,4,40,48]
+            .Node("Unsqueeze", ["d2", "ax3"], ["u"])                                     // [1,4,40,1,48]
+            .Node("Reshape", ["u", "r1"], ["s1"]).Node("Reshape", ["s1", "r2"], ["s2"])  // [1,4,20,2,24,2]
+            .Node("Transpose", ["s2"], ["st"], ("perm", new[] { 0, 1, 3, 5, 2, 4 }))
+            .Node("Reshape", ["st", "r3"], ["s3"]).Node("Squeeze", ["s3", "ax23"], ["un"]) // [1,16,20,24]
+            .Node("ReduceMean", ["t"], ["g"], ("axes", new[] { 2, 3 }), ("keepdims", 0))
+            .Node("Gemm", ["g", "Wg", "Bg"], ["gg"], ("transB", 1))                       // [1,32]
+            .Node("Unsqueeze", ["gg", "ax23"], ["g4"])                                   // [1,32,1,1]
+            .Node("Slice", ["g4"], ["g16"], ("starts", new[] { 0 }), ("ends", new[] { 16 }), ("axes", new[] { 1 }))
+            .Node("Add", ["un", "g16"], ["sum"])
+            .Node("Clip", ["sum", "lo", "hi"], ["y"])
+            .Output("y").Build();
+        OnnxModel m = OnnxModel.Load(model);
+        int[][] shapes = [[1, c, 10, 12], [1, 4, 6, 6]];
+        var opt = new CompileOptions(Nhwc: true);
+        using var cpu = new InferenceSession(GraphCompiler.Compile(m, shapes[0], opt));
+        Assert.Equal(2, cpu.InputCount);
+        Assert.Equal(shapes[1], cpu.GetInputShape(1));   // static dims from the model
+        var r = new Random(4);
+        float[][] ins = [Rand(r, 8 * 120, 2f), Rand(r, 4 * 36, 2f)];
+        for (int k = 0; k < 2; k++) ins[k].CopyTo(cpu.GetInput(k));
+        cpu.Run();
+        float[] want = cpu.Output.ToArray();
+        // the unfused NCHW plan agrees (layouts, relayouts and the new kernels' NCHW paths)
+        using (var plain = new InferenceSession(GraphCompiler.Compile(m, shapes[0], new CompileOptions(Nhwc: false, Fuse: false))))
+        {
+            for (int k = 0; k < 2; k++) ins[k].CopyTo(plain.GetInput(k));
+            plain.Run();
+            float[] p = plain.Output.ToArray();
+            for (int i = 0; i < want.Length; i++) Assert.True(Math.Abs(p[i] - want[i]) <= 1e-4f, $"nchw [{i}] {p[i]} vs {want[i]}");
+        }
+        float[]? got = null;
+        if (backend == "vulkan")
+        {
+            VkBackend be;
+            try { be = VkBackend.Default; _ = be.DeviceName; }
+            catch { Skip.If(true, "no vulkan device"); return; }
+            using VkInferenceSession s = be.NewSession(m, shapes[0], opt);
+            Assert.Equal(2, s.InputCount);
+            for (int k = 0; k < 2; k++) ins[k].CopyTo(s.GetInput(k));
+            s.Run();
+            got = s.Output.ToArray();
+        }
+        else
+        {
+            Skip.IfNot(OperatingSystem.IsMacOS(), "no metal device");
+            MetalBackend mb;
+            try { mb = MetalBackend.Default; _ = mb.DeviceName; }
+            catch { Skip.If(true, "no metal device"); return; }
+            using MtlInferenceSession s = mb.NewSession(m, shapes[0], opt);
+            for (int k = 0; k < 2; k++) ins[k].CopyTo(s.GetInput(k));
+            s.Run();
+            got = s.Output.ToArray();
+        }
+        float tol = 0.01f * want.Max(Math.Abs) + 0.02f;
+        for (int i = 0; i < want.Length; i++)
+            Assert.True(Math.Abs(got[i] - want[i]) <= tol, $"{backend} [{i}] gpu {got[i]} vs cpu {want[i]}");
+    }
+
     /// <summary>CPU fused plan against the unfused one (fusions must not change the math beyond rounding).</summary>
     private static void CheckCpuFusion(OnnxModel m, int[] shape, string what)
     {
