@@ -92,7 +92,7 @@ PSNR goldens identical.
 
 ## DocGainNet (2026-10-17, new model: no old engine to compare with)
 
-`F:\_\code\DocGainNetelease\docgainnet.onnx`, image 1x3x1152x1600 + thumb 1x3x512x512, a RealDAE
+`DocGainNet/release/docgainnet.onnx` (sibling repo), image 1x3x1152x1600 + thumb 1x3x512x512, a RealDAE
 photo; `bench --micro multi` against onnxruntime 1.31 CPU (`tools/ort_ref_multi.py`).
 
 | engine | median ms | min ms | vs ORT fp32 |
