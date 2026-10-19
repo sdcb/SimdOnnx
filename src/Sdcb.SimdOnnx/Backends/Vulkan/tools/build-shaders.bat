@@ -13,7 +13,7 @@ if not exist "%GLSLC%" (
 set "DIR=%~dp0..\Shaders"
 set "O=-O --target-env=vulkan1.1"
 for %%f in ("%DIR%\*.comp") do (
-    if not "%%~nxf"=="conv_tile.comp" if not "%%~nxf"=="conv_cm.comp" if not "%%~nxf"=="sgprobe.comp" if not "%%~nxf"=="conv_dot.comp" if not "%%~nxf"=="gemm_dot.comp" if not "%%~nxf"=="pw_dot.comp" if not "%%~nxf"=="conv_kdot.comp" if not "%%~nxf"=="im2col.comp" if not "%%~nxf"=="gemm_cm8.comp" (
+    if not "%%~nxf"=="conv_tile.comp" if not "%%~nxf"=="conv_cm.comp" if not "%%~nxf"=="sgprobe.comp" if not "%%~nxf"=="conv_dot.comp" if not "%%~nxf"=="gemm_dot.comp" if not "%%~nxf"=="pw_dot.comp" if not "%%~nxf"=="conv_kdot.comp" if not "%%~nxf"=="im2col.comp" if not "%%~nxf"=="gemm_cm8.comp" if not "%%~nxf"=="gemm_nc.comp" (
         echo glslc %%~nxf
         "%GLSLC%" %O% "%%f" -o "%%~dpnf.spv" || exit /b 1
         "%GLSLC%" %O% -DF16 "%%f" -o "%%~dpnf_h.spv" || exit /b 1
@@ -53,6 +53,9 @@ set "G8=%DIR%\gemm_cm8.comp"
 "%GLSLC%" %O% "%DIR%\pw_dot.comp" -o "%DIR%\pw_dot_h.spv" || exit /b 1
 "%GLSLC%" %O% "%DIR%\conv_kdot.comp" -o "%DIR%\conv_kdot_h.spv" || exit /b 1
 "%GLSLC%" %O% "%DIR%\im2col.comp" -o "%DIR%\im2col_h.spv" || exit /b 1
+rem Intel no-coopmat GPUs (Xe-LP iGPUs): register-tiled GEMM on 8-lane subgroups, fp16 storage only
+"%GLSLC%" %O% "%DIR%\gemm_nc.comp" -o "%DIR%\gemm_nc_h.spv" || exit /b 1
+"%GLSLC%" %O% -DSIMPLE "%DIR%\gemm_nc.comp" -o "%DIR%\gemm_nc_s_h.spv" || exit /b 1
 rem wide-wave no-coopmat GPUs (Adreno): register-tiled direct kernels, fp16 storage only
 set "CD=%DIR%\conv_dot.comp"
 "%GLSLC%" %O% -DSW=1u -DTM=4 -DTN=2 "%CD%" -o "%DIR%\conv_dot_s1_4x2_h.spv" || exit /b 1

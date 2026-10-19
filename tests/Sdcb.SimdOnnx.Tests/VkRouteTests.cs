@@ -101,10 +101,61 @@ public class VkRouteTests
             be.Dev.CoopMat16 = false;
             be.Dev.CoopM8 = false;
             be.Dev.ConvDot = true;
+            be.Dev.NcDirect = false;
             return be;
         }
         catch { return null; }
     });
+
+    [SkippableTheory]
+    // Intel no-coopmat routing (VkDevice.NcDirect, Xe-LP iGPUs; needs the 8-lane pin, so real devices only):
+    // n, ic, oc, k, stride, pad, h, w, epilogue (0 none, 1 relu, 2 swish), expected dispatch prefix
+    [InlineData(1, 64, 96, 1, 1, 0, 40, 60, 1, "pw_dot(")]        // cin <= 96: pw_dot at any size
+    [InlineData(1, 128, 96, 1, 1, 0, 9, 13, 1, "pw_dot(")]        // cin 128 within 2^16 outputs
+    [InlineData(1, 128, 96, 1, 1, 0, 40, 60, 1, "gemm_nc_s(")]    // cin 128 past 2^16 outputs
+    [InlineData(2, 160, 48, 1, 1, 0, 7, 9, 0, "gemm_nc_s(")]      // batch, M tail, N < tile
+    [InlineData(1, 144, 30, 1, 1, 0, 6, 6, 1, "gemm_nc_s(")]      // N % 4 != 0
+    [InlineData(1, 256, 72, 1, 1, 0, 11, 17, 2, "gemm_nc(")]      // swish: the staged epilogue build
+    [InlineData(1, 16, 32, 3, 1, 1, 12, 20, 1, "conv_kdot(")]
+    [InlineData(2, 24, 48, 3, 2, 1, 13, 15, 0, "conv_kdot(")]     // batch, stride 2, odd sizes
+    [InlineData(1, 128, 64, 3, 1, 1, 10, 14, 1, "gemm_nc_s(")]    // K = 1152: im2col + gemm_nc
+    [InlineData(2, 128, 36, 3, 2, 1, 9, 11, 2, "gemm_nc(")]       // batch, stride 2, N tail
+    public void NcDirect_MatchesCpu(int n, int ic, int oc, int k, int stride, int pad, int h, int w, int epi, string route)
+    {
+        Skip.IfNot(VkOk() && VkBackend.Default.Dev.NcDirect && VkBackend.Default.F16, "no NcDirect device");
+        var rng = new Random(ic * 29 + oc * 3 + k + epi);
+        var b = new OnnxBuilder().Input("x", n, ic, h, w)
+            .Init("W", Rand(rng, oc * ic * k * k, 0.3f), oc, ic, k, k)
+            .Init("B", Rand(rng, oc, 0.5f), oc)
+            .Node("Conv", ["x", "W", "B"], [epi == 0 ? "y" : "c"],
+                ("kernel_shape", new[] { k, k }), ("pads", new[] { pad, pad, pad, pad }), ("strides", new[] { stride, stride }));
+        if (epi == 1) b.Node("Relu", ["c"], ["y"]);
+        if (epi == 2) b.Node("Sigmoid", ["c"], ["g"]).Node("Mul", ["c", "g"], ["y"]);
+        OnnxModel m = OnnxModel.Load(b.Output("y").Build());
+        int[] shape = [n, ic, h, w];
+        Assert.Contains(VkBackend.Default.GraphFor(m, shape).Dispatches, d => d.Name.StartsWith(route, StringComparison.Ordinal));
+        Check(m, shape, route, rng);
+    }
+
+    [SkippableTheory]
+    // t rows, k, n, expected dispatch prefix on NcDirect devices
+    [InlineData(40, 64, 96, "pw_dot(")]
+    [InlineData(80, 256, 200, "gemm_nc_s(")]
+    [InlineData(33, 160, 64, "gemm_nc_s(")]
+    public void NcDirectGemm_MatchesCpu(int t, int k, int nn, string route)
+    {
+        Skip.IfNot(VkOk() && VkBackend.Default.Dev.NcDirect && VkBackend.Default.F16, "no NcDirect device");
+        var rng = new Random(t * 37 + k);
+        OnnxModel m = OnnxModel.Load(new OnnxBuilder().Input("x", 1, t, k)
+            .Init("W", Rand(rng, k * nn, 0.2f), k, nn)
+            .Init("B", Rand(rng, nn, 0.5f), nn)
+            .Node("MatMul", ["x", "W"], ["mm"])
+            .Node("Add", ["mm", "B"], ["y"])
+            .Output("y").Build());
+        int[] shape = [1, t, k];
+        Assert.Contains(VkBackend.Default.GraphFor(m, shape).Dispatches, d => d.Name.StartsWith(route, StringComparison.Ordinal));
+        Check(m, shape, route, rng);
+    }
 
     private static void Check(OnnxModel m, int[] shape, string route, Random rng, VkBackend? backend = null)
     {

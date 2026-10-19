@@ -264,7 +264,11 @@ float[] RunGcdrVk()
     var sw = Stopwatch.StartNew();
     G.Onnx.OnnxModel m = G.Onnx.OnnxModel.Load(modelBytes);
     var be = G.Backends.Vulkan.VkBackend.Default;
-    using var s = be.NewSession(m, shape);
+    // BENCH_VK_OCR=1: vec4 memory-bound kernels on every device, as SimdPaddleOCR compiles its Vulkan graphs
+    // (GpuOcrSession.OptionsFor; its physical NHWC input is not modelled here)
+    using var s = Environment.GetEnvironmentVariable("BENCH_VK_OCR") == "1"
+        ? be.NewSession(m, shape, new G.Engine.CompileOptions(Nhwc: true, Vec4Eltwise: true))
+        : be.NewSession(m, shape);
     double compileMs = sw.Elapsed.TotalMilliseconds;
     input.CopyTo(s.Input);
     double first = Time(() => s.Run());

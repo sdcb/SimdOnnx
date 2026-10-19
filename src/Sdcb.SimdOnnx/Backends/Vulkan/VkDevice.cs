@@ -59,6 +59,11 @@ internal unsafe sealed class VkDevice : IDisposable
     /// the stem conv+pool with the four pool pixels per weight load (convpool_pi) and the UpHead
     /// tail two pixels per invocation (uphead_sc2). fp16 storage only (GCDRNET_VK_DOT=0 disables).</summary>
     public bool ConvDot;
+    /// <summary>Intel GPUs without cooperative matrices whose compute subgroup can be pinned to 8 lanes
+    /// (Xe-LP iGPUs such as the UHD 770): dense convs and const Gemms on the old OCR engine's no-coopmat
+    /// kernels (pw_dot / conv_kdot / im2col + gemm_nc on 8-lane subgroups) instead of the shared-staged
+    /// conv_tile / gemm, about 2x slower there (GCDRNET_VK_NCDIRECT=0 disables).</summary>
+    public bool NcDirect;
     private const uint VendorIntel = 0x8086;
     /// <summary>Largest DEVICE_LOCAL heap (bytes).</summary>
     public ulong DeviceLocalHeap;
@@ -273,6 +278,17 @@ internal unsafe sealed class VkDevice : IDisposable
         }
         else pinSg32 = false;
         bool pinSg = pinSg32 || pinSg16;
+        // Intel GPUs without coopmat (Xe-LP iGPUs): gemm_nc keeps its 64 fp32 accumulators in registers
+        // only on 8-lane subgroups (wider SIMD spills them), so NcDirect needs 8 lanes pinnable
+        bool pinSg8 = false;
+        if (!wantCm && d.VendorId == VendorIntel && d.StorageBuffer16 && hasSgc && sgcCompute
+            && d.SubgroupMin <= 8 && d.SubgroupMax >= 8
+            && Environment.GetEnvironmentVariable("GCDRNET_VK_NCDIRECT") != "0")
+        {
+            Vk.VkPhysicalDeviceFeatures2 fq = new() { SType = VkConst.StPhysicalDeviceFeatures2, PNext = &sgcQ };
+            Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &fq);
+            pinSg8 = sgcQ.SubgroupSizeControl != 0;
+        }
 
         byte** extsToEnable = stackalloc byte*[5];
         uint nExt = 0;
@@ -283,7 +299,7 @@ internal unsafe sealed class VkDevice : IDisposable
         System.Text.Encoding.ASCII.GetBytes("VK_KHR_vulkan_memory_model\0", new Span<byte>(pVmm, 32));
         System.Text.Encoding.ASCII.GetBytes("VK_EXT_subgroup_size_control\0", new Span<byte>(pSgc, 32));
         if (wantCm) { extsToEnable[nExt++] = pCm; extsToEnable[nExt++] = pF16; extsToEnable[nExt++] = pVmm; }
-        if (pinSg) extsToEnable[nExt++] = pSgc;
+        if (pinSg || pinSg8) extsToEnable[nExt++] = pSgc;
         Vk.VkPhysicalDeviceShaderFloat16Int8Features f16en = new()
         {
             SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features, ShaderFloat16 = 1,
@@ -304,7 +320,7 @@ internal unsafe sealed class VkDevice : IDisposable
         if (pinSg) vmmEn.PNext = &sgcEn;
         coopEn.PNext = &vmmEn;
         f16en.PNext = &coopEn;
-        feat16.PNext = wantCm ? &f16en : null;
+        feat16.PNext = wantCm ? &f16en : pinSg8 ? &sgcEn : null;
 
         // To enable 16-bit storage we chain feat16 into VkDeviceCreateInfo.pNext
         // (VK 1.1 core: no extension needed). PEnabledFeatures must be null when
@@ -393,6 +409,7 @@ internal unsafe sealed class VkDevice : IDisposable
         }
         d.ConvDot = !d.CoopMat16 && hasSgc && d.SubgroupMin >= 64 && d.StorageBuffer16
             && Environment.GetEnvironmentVariable("GCDRNET_VK_DOT") != "0";
+        d.NcDirect = pinSg8 && !d.CoopMat16 && !d.ConvDot;
         if (Environment.GetEnvironmentVariable("GCDRNET_VK_VERBOSE") == "1")
         {
             Console.Error.WriteLine($"[vk] device={d.DeviceName} type={props.DeviceType} vendor=0x{d.VendorId:x4} " +
@@ -400,7 +417,7 @@ internal unsafe sealed class VkDevice : IDisposable
                 $"sg={d.SubgroupSize} sgRange={d.SubgroupMin}-{d.SubgroupMax} sgcCompute={sgcCompute} push={d.PushDescriptors} " +
                 $"coopmat={d.CoopMat16} coopSg={(d.CoopSubgroupSize == 0 ? "default" : d.CoopSubgroupSize.ToString())} " +
                 $"m8={d.CoopM8} fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} cp3={d.ConvPoolK3} " +
-                $"dot={d.ConvDot} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+                $"dot={d.ConvDot} ncd={d.NcDirect} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
             for (uint i = 0; i < nqf; i++)
                 Console.Error.WriteLine($"[vk] qf{i}: flags=0x{qf[i].QueueFlags:x} count={qf[i].QueueCount} tsbits={qf[i].TimestampValidBits}"
                     + (i == d.QueueFamily ? " <- selected" : ""));
