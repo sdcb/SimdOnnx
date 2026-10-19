@@ -25,7 +25,7 @@ the same or lower peak memory and the same or better accuracy** than its old eng
    projects on the new side. Note every skipped GPU test and why (`no coopmat device` is expected on
    devices without cooperative matrices).
 6. **Device breadcrumb**: record the `[vk] device=...` line printed with `GCDRNET_VK_VERBOSE=1`
-   (vendor, driver, subgroup size, `coopmat` / `m8` / `lite` / `vec4` / `dot` / `fullSg`); it decides the
+   (vendor, driver, subgroup size, `coopmat` / `m8` / `lite` / `vec4` / `dot` / `ncd` / `fullSg`); it decides the
    routing (`src/Sdcb.SimdOnnx/Backends/Vulkan/VkDevice.cs`, `VkGraph.cs`).
 7. **A/B, interleaved**: old and new back to back per case, alternating which goes first, at least
    3 rounds (6 when ratios are within 3%), medians. Machine idle, high-performance power plan, AC
@@ -38,7 +38,8 @@ the same or lower peak memory and the same or better accuracy** than its old eng
    `SIMDONNX_VK_SMALLDOT=0` (no small-K / wide-subgroup `pw_dot` / `conv_kdot` routes),
    `GCDRNET_VK_VEC4=0` (no vec4 elementwise; Paddle forces vec4 on through `CompileOptions`),
    `SIMDONNX_VK_F16=0` (fp32 storage), `SIMDONNX_VK_CM1X1=0`, `SIMDONNX_VK_SG16STAGED=1`,
-   `SIMDONNX_VK_STAGE_WC=0`. Device details: `GCDRNET_VK_VERBOSE=1` (the breadcrumb of step 6),
+   `SIMDONNX_VK_STAGE_WC=0`, `GCDRNET_VK_NCDIRECT=0` (Intel no-coopmat iGPUs: back to `conv_tile` / `gemm`\r
+   instead of `pw_dot` / `conv_kdot` / `gemm_nc`). Device details: `GCDRNET_VK_VERBOSE=1` (the breadcrumb of step 6),
    `SIMDONNX_STATS=1` (graph-cache misses and compile cost at exit). Per-shader GPU time: the GcdrNet
    benchmark's `--vkprof <h> <w>` (`VKPROF_NODES=1` adds the top dispatches); CPU operator profile:
    `SIMDONNX_PROF=1`. For CPU: the ISA switches `DOTNET_EnableAVX512=0` / `DOTNET_EnableAVX2=0`

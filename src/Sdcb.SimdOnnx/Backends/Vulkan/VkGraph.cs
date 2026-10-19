@@ -208,7 +208,8 @@ public sealed class VkGraphModel : IDisposable
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static M8Route RouteM8ConvCore(VkDevice dev, bool f16, ExecPlan plan, ExecNode n, ConvP cp)
     {
-        if (!M8Direct(dev, f16, plan))
+        bool nc = NcDirect(dev, f16, plan);
+        if (!M8Direct(dev, f16, plan) && !nc)
             return SmallDotConv(dev, f16, plan, n, cp) ? M8Route.Dot : WideDotConv(dev, f16, plan, n, cp) ? M8Route.KDot : M8Route.None;
         if (cp.Group != 1 || cp.Pool is not null || cp.Dilations.Any(d => d != 1)) return M8Route.None;
         if (cp.PadMode != PadMode.Constant || cp.PadValue != 0f) return M8Route.None;
@@ -219,9 +220,13 @@ public sealed class VkGraphModel : IDisposable
         bool pointwise = cp.Kernel[0] == 1 && cp.Kernel[1] == 1 && cp.Strides.All(s => s == 1) && cp.Pads.All(q => q == 0);
         if (pointwise)
         {
-            // small-K pointwise: the dot kernel outruns the tensor cores (old engine: cin <= 128)
-            if (ic % 4 == 0 && oc % 4 == 0 && ic <= 128) return M8Route.Dot;
-            return ic % 16 == 0 ? M8Route.Cm8 : M8Route.None;
+            // small-K pointwise: the dot kernel outruns the tensor cores (old engine: cin <= 128); on
+            // NcDirect devices gemm_nc takes the large outputs of cin 97..128 (UHD 770: pw_dot wins
+            // below that at any size, gemm_nc above 2^16 outputs)
+            long mn = plan.Values[n.Out[0]].ElementCount;
+            if (ic % 4 == 0 && oc % 4 == 0 && ic <= 128 && (!nc || mn <= NcDotLimit || ic <= 96)) return M8Route.Dot;
+            if (ic % 16 == 0) return M8Route.Cm8;
+            return nc && ic % 4 == 0 && oc % 4 == 0 ? M8Route.Dot : M8Route.None;
         }
         if (ic % 4 != 0) return M8Route.None;
         int k = cp.Kernel[0] * cp.Kernel[1] * ic;
@@ -238,17 +243,29 @@ public sealed class VkGraphModel : IDisposable
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static M8Route RouteM8GemmCore(VkDevice dev, bool f16, ExecPlan plan, ExecNode n, GemmP gp)
     {
-        bool direct = M8Direct(dev, f16, plan);
+        bool direct = M8Direct(dev, f16, plan), nc = NcDirect(dev, f16, plan);
         if (!f16 || gp.TransB) return M8Route.None;
         CValue a = plan.Values[n.In[0]], b = plan.Values[n.In[1]];
         if (b.Floats is null || b.Shape.Length != 2 || a.Buf < 0) return M8Route.None;
         if (gp.Act is ActivationKind.Sigmoid) return M8Route.None;
         int k = a.Shape[^1], nn = b.Shape[1];
         if (a.PhysShape[^1] != k) return M8Route.None;
+        long mn = a.ElementCount / k * nn;
         if (k % 4 == 0 && nn % 4 == 0 && k <= 128
-            && (direct || a.ElementCount / k * nn <= SmallDotLimit(dev, plan))) return M8Route.Dot;
-        return direct && k % 16 == 0 ? M8Route.Cm8 : M8Route.None;
+            && (direct || mn <= (nc ? NcDotLimit : SmallDotLimit(dev, plan)))) return M8Route.Dot;
+        return (direct || nc) && k % 16 == 0 ? M8Route.Cm8 : M8Route.None;
     }
+
+    /// <summary>Largest M x N pw_dot takes on <see cref="VkDevice.NcDirect"/> devices (old OCR engine's
+    /// no-coopmat tier); larger small-K outputs go to gemm_nc.</summary>
+    private const long NcDotLimit = 1L << 16;
+
+    /// <summary>Intel no-coopmat devices (<see cref="VkDevice.NcDirect"/>, Xe-LP iGPUs): dense convs and
+    /// const Gemms on the old OCR engine's direct kernels (pw_dot / conv_kdot / im2col) with gemm_nc for
+    /// the GEMMs, instead of the shared-staged conv_tile / gemm. <see cref="CompileOptions.StagedCoopConv"/>
+    /// only picks a coopmat build, so it does not apply (UHD 770, GcdrNet 1600x1152: 965 -> 875 ms).</summary>
+    [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+    private static bool NcDirect(VkDevice dev, bool f16, ExecPlan plan) => f16 && dev.NcDirect;
 
     /// <summary>Largest M x N the small-K dot kernel takes on devices off the SG16 direct family
     /// (old OCR engine): 32-lane coopmat devices 2^18 (lite: 2^16, a quarter), no coopmat 2^16 —
@@ -303,6 +320,13 @@ public sealed class VkGraphModel : IDisposable
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static (string shader, uint bm, uint bn) Cm8Tile(uint nn) =>
         nn <= 32 ? ("gemm_cm8_n32", 512u, 32u) : nn <= 64 ? ("gemm_cm8_n64", 256u, 64u) : ("gemm_cm8", 128u, 128u);
+
+    /// <summary>GEMM kernel of the Cm8 / Im2col routes: gemm_nc (64 x 64 tiles; the unrolled-epilogue
+    /// build for none / relu / hardswish) on <see cref="VkDevice.NcDirect"/> devices, else gemm_cm8.</summary>
+    private (string shader, uint bm, uint bn) GemmTile(uint nn, ActivationKind act) =>
+        _dev.NcDirect
+            ? (act is ActivationKind.None or ActivationKind.Relu or ActivationKind.HardSwish ? "gemm_nc_s" : "gemm_nc", 64u, 64u)
+            : Cm8Tile(nn);
 
     /// <summary>Binding of an arena value widened to <paramref name="bytes"/> (tile reads past its
     /// end); the arena grows so the widened range stays inside it.</summary>
@@ -602,7 +626,7 @@ public sealed class VkGraphModel : IDisposable
                             dx, dy, nb, name: "conv_kdot"));
                         break;
                     }
-                    (string g8, uint bm, uint bn) = Cm8Tile(oc);
+                    (string g8, uint bm, uint bn) = GemmTile(oc, p.Act);
                     uint rowsPad = (m + bm - 1) / bm * bm;
                     VkBind a;
                     uint kp;
@@ -624,7 +648,7 @@ public sealed class VkGraphModel : IDisposable
                     }
                     output.Add(ND(g8,
                         [a, Bind(n.In[1], CK.CmW), B(p.BiasValue, CK.F32), B(p.AddValue), Bind(n.Out[0])],
-                        PcOf(m, oc, kp, m8flags), rowsPad / bm, (oc + bn - 1) / bn, name: "gemm_cm8"));
+                        PcOf(m, oc, kp, m8flags), rowsPad / bm, (oc + bn - 1) / bn, name: g8.StartsWith("gemm_nc", StringComparison.Ordinal) ? "gemm_nc" : "gemm_cm8"));
                     break;
                 }
                 if (UseCoopConv(_dev, F16, _plan, n, p))
@@ -723,11 +747,11 @@ public sealed class VkGraphModel : IDisposable
                             PcOf(m, nn, k, gf), dx, dy, name: "gemm_dot8"));
                         break;
                     }
-                    (string g8, uint bm, uint bn) = Cm8Tile(nn);
+                    (string g8, uint bm, uint bn) = GemmTile(nn, p.Act);
                     uint rowsPad = (m + bm - 1) / bm * bm;
                     output.Add(ND(g8,
                         [BindPadded(n.In[0], (ulong)rowsPad * k * 2), Bind(n.In[1], CK.GemmCmW), B(p.BiasValue, CK.F32), B(-1), Bind(n.Out[0])],
-                        PcOf(m, nn, k, gf), rowsPad / bm, (nn + bn - 1) / bn, name: "gemm_cm8"));
+                        PcOf(m, nn, k, gf), rowsPad / bm, (nn + bn - 1) / bn, name: g8.StartsWith("gemm_nc", StringComparison.Ordinal) ? "gemm_nc" : "gemm_cm8"));
                     break;
                 }
                 if (UseCoopGemm(_dev, F16, _plan, n, p))
@@ -1070,6 +1094,13 @@ public sealed class VkGraphModel : IDisposable
                 {
                     // 8x16x16 fragments: the lane mapping needs the subgroup pinned to 16
                     Pipe = _dev.GetPipeline(shader + "_h", binds.Length, pc.Length, 16u),
+                    Pc = pc, Binds = binds, Gx = gx, Gy = gy, Gz = gz, Name = $"{shader}({n.Name})",
+                }
+                : shader.StartsWith("gemm_nc", StringComparison.Ordinal)
+                ? new VkDispatch
+                {
+                    // 8 lanes keep the 64 fp32 accumulators in registers
+                    Pipe = _dev.GetPipeline(shader + "_h", binds.Length, pc.Length, 8u),
                     Pc = pc, Binds = binds, Gx = gx, Gy = gy, Gz = gz, Name = $"{shader}({n.Name})",
                 }
                 : Dispatch(n, shader, binds, pc, gx, gy, gz);
