@@ -338,6 +338,13 @@ public sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool Mem
     // for dense convs. Much faster on wide feature maps, but some workloads (the OCR models)
     // intermittently lose the device with it on the Arc B580, so the default is the direct-load
     // family (pw_dot / conv_kdot / gemm_cm8). Opt in only for workloads stress-tested with it.
+    /// <summary>
+    /// Let the arena reuse the input buffers after their last read. Off by default: the input then
+    /// stays intact for the whole run, so a caller may read or rerun it afterwards. A caller that
+    /// writes a fresh input before every run (and reads only the output) can turn it on to lower the
+    /// peak, e.g. a detector whose input is live while the first layers' outputs peak.
+    /// </summary>
+    public bool ReleaseInputs { get; init; }
     public bool Gpu => Target != PlanTarget.Cpu;
     /// <summary>SIMDONNX_NHWC=0 (or legacy GCDRNET_NHWC=0) forces the all-NCHW plan (A/B oracle).</summary>
     public static bool DefaultNhwc { get; } = Env.Flag("NHWC") != "0";

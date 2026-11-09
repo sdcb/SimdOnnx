@@ -184,7 +184,7 @@ internal static class GraphCompiler
                 FuseMemory(nodes, values, outputValue, opt.Gpu);
             }
 
-            PlanArena(nodes, values, bufSize, inputValues, outputValue,
+            PlanArena(nodes, values, bufSize, inputValues, outputValue, opt.ReleaseInputs,
                 out int[] offsets, out int arenaFloats);
             if (Env.Flag("DUMP") == "2")
             {
@@ -1326,7 +1326,7 @@ internal static class GraphCompiler
         /// <summary>Lifetime-based arena packing (def-order, free-list reuse).</summary>
         [MethodImpl(MethodImplCompat.AggressiveOptimization)]
         private static void PlanArena(List<ExecNode> nodes, List<CValue> values,
-            List<int> bufSize, int[] inputValues, int outputValue,
+            List<int> bufSize, int[] inputValues, int outputValue, bool releaseInputs,
             out int[] offsets, out int arenaFloats)
         {
             int inputValue = inputValues[0];
@@ -1368,8 +1368,8 @@ internal static class GraphCompiler
                 inRank[ib] = k;
                 def[ib] = -1;
                 // keep inputs + output live for the whole run: callers may read
-                // Input (e.g. two-stage pipelines reusing it) after Run().
-                use[ib] = nodes.Count;
+                // Input (e.g. two-stage pipelines reusing it) after Run(), unless they opted out
+                if (!releaseInputs) use[ib] = nodes.Count;
             }
             use[outputBuf] = nodes.Count;
 

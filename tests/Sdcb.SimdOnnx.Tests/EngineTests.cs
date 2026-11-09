@@ -61,6 +61,36 @@ public class EngineTests
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ReleaseInputs_ReusesTheInputBuffer_SameOutput(bool nhwc)
+    {
+        // x -> conv 8->32 -> relu -> conv 32->8: the input is dead after the first conv, so with
+        // ReleaseInputs the second conv's output may take its place; the outputs are the same bits
+        var rng = new Random(11);
+        byte[] bytes = new OnnxBuilder().Input("x", 1, 8, 24, 20)
+            .Init("W1", rng.Array(32 * 8), 32, 8, 1, 1).Init("W2", rng.Array(8 * 32), 8, 32, 1, 1)
+            .Node("Conv", ["x", "W1"], ["c1"], ("kernel_shape", new[] { 1, 1 }))
+            .Node("Relu", ["c1"], ["r1"])
+            .Node("Conv", ["r1", "W2"], ["y"], ("kernel_shape", new[] { 1, 1 }))
+            .Output("y").Build();
+        OnnxModel m = OnnxModel.Load(bytes);
+        int[] shape = [1, 8, 24, 20];
+        float[] input = rng.Array(8 * 24 * 20);
+        (float[] output, int arena) Run(bool release)
+        {
+            ExecPlan plan = GraphCompiler.Compile(m, shape, new CompileOptions(nhwc) { ReleaseInputs = release });
+            using var s = new InferenceSession(plan);
+            input.CopyTo(s.Input); s.Run();
+            return (s.Output.ToArray(), plan.ArenaFloats);
+        }
+        var (kept, keptArena) = Run(false);
+        var (released, releasedArena) = Run(true);
+        Assert.Equal(kept, released);
+        Assert.True(releasedArena < keptArena, $"arena {releasedArena} floats with ReleaseInputs, {keptArena} without");
+    }
+
     [Fact]
     public void NoFuse_MatchesFused()
     {
