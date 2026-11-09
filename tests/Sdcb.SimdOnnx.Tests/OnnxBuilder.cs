@@ -9,6 +9,10 @@ namespace Sdcb.SimdOnnx.Tests;
 internal sealed class OnnxBuilder
 {
     private readonly List<byte[]> _nodes = [], _inits = [], _inputs = [], _outputs = [];
+    private int _opset = 13;
+
+    /// <summary>Default-domain opset version written to the model (13 unless set).</summary>
+    public OnnxBuilder Opset(int version) { _opset = version; return this; }
 
     public OnnxBuilder Input(string name, params int[] shape) { _inputs.Add(ValueInfo(name, shape)); return this; }
     public OnnxBuilder Output(string name) { _outputs.Add(ValueInfo(name, null)); return this; }
@@ -74,7 +78,7 @@ internal sealed class OnnxBuilder
         foreach (byte[] v in _outputs) g.Message(12, v);
         var opset = new Pb();
         opset.String(1, "");
-        opset.Varint(2, 13);
+        opset.Varint(2, (ulong)_opset);
         var m = new Pb();
         m.Varint(1, 8);
         m.Message(7, g.ToArray());

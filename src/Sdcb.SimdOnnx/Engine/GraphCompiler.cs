@@ -1735,8 +1735,16 @@ internal static class GraphCompiler
         private void EmitPad(OnnxNodeData n)
         {
             CValue x = V(Input(0, n));
-            long[] pads = V(Input(1, n)).Ints!;
-            float val = n.Inputs.Count > 2 && n.Inputs[2].Length > 0 ? V(Input(2, n)).Floats![0] : 0f;
+            // opset >= 11: pads / constant_value as inputs; older: attributes
+            long[] pads = IntsArg(n, 1, "pads")
+                ?? throw new InvalidDataException($"Pad '{n.Name}': no pads.");
+            if (n.Inputs.Count > 3 && n.Inputs[3].Length > 0)
+                throw new NotSupportedException($"Pad '{n.Name}': axes input.");
+            if (pads.Length != 2 * x.Shape.Length)
+                throw new InvalidDataException($"Pad '{n.Name}': {pads.Length} pads for rank {x.Shape.Length}.");
+            float val = n.Inputs.Count > 2 && n.Inputs[2].Length > 0
+                ? V(Input(2, n)) is { Floats: [var f] } ? f : throw new NotSupportedException($"Pad '{n.Name}': non-constant value.")
+                : n.FloatAttr("value", 0f);
             PadMode mode = n.StringAttr("mode", "constant") switch
             {
                 "reflect" => PadMode.Reflect,
@@ -1762,8 +1770,7 @@ internal static class GraphCompiler
             if (strides.Length == 0) strides = Enumerable.Repeat(1, wd.Length - 2).ToArray();
             int[] dil = n.IntsAttr("dilations").Select(v => (int)v).ToArray();
             if (dil.Length == 0) dil = Enumerable.Repeat(1, wd.Length - 2).ToArray();
-            if (n.StringAttr("auto_pad", "NOTSET") is "SAME_UPPER")
-                pads = SameUpperPads(x.Shape.AsSpan()[2..].ToArray(), wd.AsSpan()[2..].ToArray(), strides, dil);
+            pads = AutoPads(n, pads, x.Shape.AsSpan()[2..].ToArray(), wd.AsSpan()[2..].ToArray(), strides, dil);
             int group = (int)n.IntAttr("group", 1);
             int[] outShape = new int[wd.Length];
             outShape[0] = x.Shape[0];
@@ -1793,8 +1800,11 @@ internal static class GraphCompiler
             if (strides.Length == 0) strides = (int[])kernel.Clone();
             int[] pads = n.IntsAttr("pads").Select(v => (int)v).ToArray();
             if (pads.Length == 0) pads = new int[2 * kernel.Length];
-            if (n.StringAttr("auto_pad", "NOTSET") is "SAME_UPPER")
-                pads = SameUpperPads(x.Shape.AsSpan()[2..].ToArray(), kernel, strides, Enumerable.Repeat(1, kernel.Length).ToArray());
+            if (n.IntsAttr("dilations").Any(d => d != 1))
+                throw new NotSupportedException($"{n.OpType} '{n.Name}': dilations.");
+            if (n.Outputs.Count > 1 && n.Outputs[1].Length > 0)
+                throw new NotSupportedException($"{n.OpType} '{n.Name}': Indices output.");
+            pads = AutoPads(n, pads, x.Shape.AsSpan()[2..].ToArray(), kernel, strides, Enumerable.Repeat(1, kernel.Length).ToArray());
             int[] outShape = (int[])x.Shape.Clone();
             for (int d = 0; d < kernel.Length; d++)
                 outShape[2 + d] = (x.Shape[2 + d] + pads[d] + pads[d + kernel.Length] - kernel[d]) / strides[d] + 1;
@@ -1802,8 +1812,19 @@ internal static class GraphCompiler
                 new PoolP { Kernel = kernel, Strides = strides, Pads = pads, CountIncludePad = avg && n.IntAttr("count_include_pad", 0) != 0 }, n);
         }
 
+        /// <summary>Explicit pads, or the ones <c>auto_pad</c> implies (SAME_UPPER / SAME_LOWER / VALID).</summary>
+        private static int[] AutoPads(OnnxNodeData n, int[] pads, int[] inSp, int[] k, int[] s, int[] d) =>
+            n.StringAttr("auto_pad", "NOTSET") switch
+            {
+                "NOTSET" or "" => pads,
+                "VALID" => new int[2 * k.Length],
+                "SAME_UPPER" => SamePads(inSp, k, s, d, upper: true),
+                "SAME_LOWER" => SamePads(inSp, k, s, d, upper: false),
+                var a => throw new NotSupportedException($"{n.OpType} '{n.Name}': auto_pad '{a}'."),
+            };
+
         [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-        private static int[] SameUpperPads(int[] inSp, int[] k, int[] s, int[] d)
+        private static int[] SamePads(int[] inSp, int[] k, int[] s, int[] d, bool upper)
         {
             int r = k.Length;
             int[] pads = new int[2 * r];
@@ -1811,8 +1832,9 @@ internal static class GraphCompiler
             {
                 int outLen = (inSp[i] + s[i] - 1) / s[i];
                 int total = Math.Max(0, (outLen - 1) * s[i] + (k[i] - 1) * d[i] + 1 - inSp[i]);
-                pads[i] = total / 2;
-                pads[i + r] = total - total / 2;
+                int small = total / 2, large = total - small;
+                pads[i] = upper ? small : large;        // SAME_UPPER puts the extra pad at the end
+                pads[i + r] = upper ? large : small;
             }
             return pads;
         }
@@ -1867,6 +1889,8 @@ internal static class GraphCompiler
             float[] gamma = V(Input(1, n)).Floats!, beta = V(Input(2, n)).Floats!;
             float[] mean = V(Input(3, n)).Floats!, variance = V(Input(4, n)).Floats!;
             float eps = n.FloatAttr("epsilon", 1e-5f);
+            if (n.IntAttr("training_mode") != 0 || n.Outputs.Skip(1).Any(o => o.Length > 0))
+                throw new NotSupportedException($"BatchNormalization '{n.Name}': training mode.");
             int c = gamma.Length, rank = x.Shape.Length;
             if (rank < 2 || x.Shape[1] != c) throw new NotSupportedException($"BatchNormalization '{n.Name}': channel mismatch.");
             float[] s = new float[c], t = new float[c];
@@ -1911,7 +1935,9 @@ internal static class GraphCompiler
         {
             CValue x = V(Input(0, n));
             int rank = x.Shape.Length;
-            int axis = (int)n.IntAttr("axis", -1);
+            // opset < 13: default axis 1 and the input is flattened to 2-D at axis, which equals a
+            // last-axis softmax only when axis is the last axis
+            int axis = (int)n.IntAttr("axis", _m.Opset is > 0 and < 13 ? 1 : -1);
             if (axis < 0) axis += rank;
             if (axis != rank - 1) throw new NotSupportedException($"Softmax '{n.Name}': axis {axis} is not the last.");
             Emit(ExecOp.Softmax, [Input(0, n)], ActivationValue(n.Outputs[0], x.Shape), null, n);
@@ -2004,13 +2030,23 @@ internal static class GraphCompiler
             CValue b = V(Input(1, n));
             bool transB = n.IntAttr("transB") == 1;
             float alpha = n.FloatAttr("alpha", 1f);
-            if (alpha != 1f) throw new NotSupportedException("Gemm alpha != 1.");
+            if (alpha != 1f) throw new NotSupportedException($"Gemm '{n.Name}': alpha != 1.");
+            if (n.IntAttr("transA") != 0) throw new NotSupportedException($"Gemm '{n.Name}': transA.");
+            if (b.Shape.Length != 2) throw new InvalidDataException($"Gemm '{n.Name}': B must be rank 2.");
             int k = transB ? b.Shape[1] : b.Shape[0];
             int ncol = transB ? b.Shape[0] : b.Shape[1];
             if (a.Shape[^1] != k) throw new InvalidDataException("Gemm K mismatch.");
             int[] outShape = (int[])a.Shape.Clone();
             outShape[^1] = ncol;
             int biasV = n.Inputs.Count > 2 && n.Inputs[2].Length > 0 ? Input(2, n) : -1;
+            if (biasV >= 0 && n.FloatAttr("beta", 1f) != 1f)
+            {
+                // beta scales C: fold it into a constant bias, otherwise refuse
+                float beta = n.FloatAttr("beta", 1f);
+                if (V(biasV).Floats is not { } c) throw new NotSupportedException($"Gemm '{n.Name}': beta != 1 with a non-constant C.");
+                biasV = AddValue(new CValue { Name = n.Name + "__gemm_beta_c", Shape = V(biasV).Shape, DType = 1,
+                    Floats = _m.Intern(n.Name + "__gemm_beta_c", c.Select(v => v * beta).ToArray()) });
+            }
             Emit(ExecOp.Gemm, [Input(0, n), Input(1, n)], ActivationValue(n.Outputs[0], outShape),
                 new GemmP { TransB = transB, BiasValue = biasV }, n);
         }
@@ -2019,6 +2055,10 @@ internal static class GraphCompiler
         private void EmitResize(OnnxNodeData n)
         {
             CValue x = V(Input(0, n));
+            if (n.Inputs.Count < 3)
+                throw new NotSupportedException($"Resize '{n.Name}': opset-10 form (X, scales).");
+            if (n.IntAttr("antialias") != 0 || n.IntsAttr("axes").Length > 0)
+                throw new NotSupportedException($"Resize '{n.Name}': antialias / axes.");
             float[] scales;
             int[]? sizesI = null;
             if (n.Inputs.Count > 3 && n.Inputs[3].Length > 0)
@@ -2043,7 +2083,14 @@ internal static class GraphCompiler
                 return;
             }
             if (n.StringAttr("mode") != "linear")
-                throw new NotSupportedException("Resize mode != linear.");
+                throw new NotSupportedException($"Resize '{n.Name}': mode '{n.StringAttr("mode")}'.");
+            // the kernels implement half_pixel; pytorch_half_pixel only differs on axes resized to length 1
+            string ctm = n.StringAttr("coordinate_transformation_mode", "half_pixel");
+            int[] probe = sizesI ?? x.Shape.Select((d, i) => (int)MathF.Floor(d * scales[i])).ToArray();
+            bool halfPixel = ctm == "half_pixel"
+                || (ctm == "pytorch_half_pixel" && probe.Select((d, i) => d > 1 || scales[i] == 1f).All(ok => ok));
+            if (!halfPixel)
+                throw new NotSupportedException($"Resize '{n.Name}': linear with coordinate_transformation_mode '{ctm}'.");
             int[] outShape = sizesI ?? (int[])x.Shape.Clone();
             if (sizesI == null)
                 for (int i = 0; i < outShape.Length; i++)
@@ -2098,8 +2145,8 @@ internal static class GraphCompiler
             int axis = (int)n.IntAttr("axis");
             if (axis < 0) axis += x.Shape.Length;
             int[] sizes;
-            if (n.Inputs.Count > 1 && n.Inputs[1].Length > 0)
-                sizes = V(Input(1, n)).Ints!.Select(v => (int)v).ToArray();
+            if (IntsArg(n, 1, "split") is { Length: > 0 } split)   // input (opset >= 13) or attribute (older)
+                sizes = split.Select(v => (int)v).ToArray();
             else
             {
                 int outputs = (int)n.IntAttr("num_outputs", n.Outputs.Count);
