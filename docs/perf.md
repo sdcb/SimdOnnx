@@ -75,20 +75,57 @@ Mixed-size corpus (every image a different size, so per-shape compile counts), i
 Vulkan 35.6 vs 36.3 ms per image, peak 1192 vs 1249 MB; CPU 349 vs 415 ms, peak 1145 vs 1150 MB.
 PSNR goldens identical.
 
+## Ryzen 7 5800X + RTX 3080 Ti memory pass (2026-11-09)
+
+Old = Paddle `main` `33ff8a8`; new = Paddle `main` `dd4c3aa` on SimdOnnx `0.1.0-preview.7`
+(`14d117b`). Interleaved, 3 rounds (medium vulkan 10 rounds before the fixes), median ms and peak
+working set MB:
+
+| case | old ms | new ms | old MB | new MB | exact (old/new) |
+|---|---:|---:|---:|---:|---|
+| tiny cpu 4w | 51.9 | 50.0 | 513 | 534 | 742/742 |
+| small cpu 1w | 291.5 | 220.6 | 602 | 625 | 950/950 |
+| small cpu 4w | 149.5 | 127.4 | 651 | 695 | 950/950 |
+| medium cpu 1w | 870.0 | 746.8 | 1108 | 1079 | 1004/1004 |
+| medium cpu 4w | 580.2 | 574.0 | 1170 | 1196 | 1004/1004 |
+| medium cpu 16w | 869.7 | 826.6 | 1255 | 1284 | 1004/1004 |
+| medium vulkan 4w | 43.1 | 41.1 | 1009 | 925 | 1006/1003 |
+
+What moved the memory (each measured on its own):
+
+- Paddle `GpuOcrSession.OutputShape` compiled a Full exec (vocab MatMul, its own arena and
+  output staging) per session just to read a shape after a CTC run; it now derives the shape from
+  the CTC / logits exec. Vulkan medium 1040 → 999, small 760 → 723, tiny 647 → 635 MB. This was
+  the "unattributed native growth" of the earlier runs (a live-allocation trace by caller named it).
+- The ONNX parser read float initializers into a `byte[]` and copied them to `float[]` on first
+  use; the dropped LOH arrays stayed as LOH holes (a compacting GC leaves the LOH alone). Float
+  raw_data now lands in the `float[]` directly: medium vulkan 999 → 925, medium cpu 1w 1179 → 1089.
+- `CompileOptions.ReleaseInputs` (the detector sets it): the det peak is the stem's Conv →
+  MaxPool → Concat while the input is still held; 7–13 MB on the CPU cases.
+
+Not the cause, ruled out on this machine: const pool in ReBAR vs device-local memory (peak 1036
+vs 1038 MB).
+
 ## Known gaps / next steps
 
-1. **Paddle Vulkan native memory** +8% peak on small (+3% tiny / medium): unattributed native
-   growth during the run (~16 MB + ~8 MB per worker).
-2. **Paddle CPU memory** ~+9–13% peak: allocation churn per run, per-shape caches.
-3. **Devices**: RTX 3080 Ti and Snapdragon 8 Gen 3 measured on the real hardware
+1. **Paddle Vulkan memory**: at or below the old engine on the 3080 Ti (see the 2026-11-09
+   section); the B580 has not been re-measured since the fixes.
+2. **Paddle CPU memory** +2–7% peak on the 3080 Ti machine (medium 1w below old). Left: the det
+   stem's Concat buffer (old wrote the MaxPool output straight into the Concat's channel slice,
+   ~22 MB on small), packed weights larger than old's (Winograd packs, tile padding; ~15 MB on
+   small) and plan objects (~5 MB).
+3. **Paddle CPU cls** slower with more workers (tiny 16w 16 → 25 ms, medium 16w 15 → 30 ms per
+   image); hidden in the e2e total by faster det / rec. Not investigated yet.
+4. **Devices**: RTX 3080 Ti and Snapdragon 8 Gen 3 measured on the real hardware
    (`docs/devices/`); Radeon 880M and UHD 770 pending. The 880M direct-load `sg32d` GEMM is not ported.
    Squeeze-excitation, attention and nearest-upsample + add are engine fusions now (2026-10-17).
    Open on the 3080 Ti: GcdrNet Vulkan e2e 1600x1152 8.9 → 9.8 ms (3200x2304 1.02x) although its
    GPU kernel time is 34% lower (14.3 → 9.4 ms) — host-side cost (staging memory type, upload /
-   download path), to probe there with `SIMDONNX_VK_STAGE_WC=0`; Paddle medium Vulkan 1.03x.
-4. **Device re-creation after a loss** still fails with `ErrorIncompatibleDriver` on the B580
+   download path), to probe there with `SIMDONNX_VK_STAGE_WC=0`. Paddle medium Vulkan is 0.97x since
+   preview.6 (10 interleaved rounds, 2026-11-09).
+5. **Device re-creation after a loss** still fails with `ErrorIncompatibleDriver` on the B580
    (no longer triggered).
-5. **Metal performance** unmeasured against the old engines (correctness checked in CI).
+6. **Metal performance** unmeasured against the old engines (correctness checked in CI).
 
 ## DocGainNet (2026-10-17, new model: no old engine to compare with)
 
