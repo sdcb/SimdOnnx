@@ -253,8 +253,15 @@ internal static class GraphCompiler
         [MethodImpl(MethodImplCompat.AggressiveOptimization)]
         private static void RunPasses(PassStage stage, List<ExecNode> nodes, List<CValue> values, int outputValue, CompileOptions opt)
         {
-            if (opt.Extensions is not { } ext) return;
             var ctx = new PassContext(nodes, values, outputValue, opt);
+            // built-in pattern fusions first, in the slot consumer extensions run in
+            if (stage == PassStage.Logical)
+            {
+                if (opt.FuseChannelShift) FuseShiftPass.Instance.Run(ctx);
+                if (opt.FuseUpHead) FuseUpHeadPass.Instance.Run(ctx);
+            }
+            else if (opt.FuseUpHead) UpHeadSkipRecomputePass.Instance.Run(ctx);
+            if (opt.Extensions is not { } ext) return;
             foreach (GraphPass p in ext.Passes)
                 if (p.Stage == stage) p.Run(ctx);
         }

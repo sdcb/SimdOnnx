@@ -270,4 +270,56 @@ public unsafe class VkKernelTests
         try { _ = VkBackend.Default.Dev.DeviceName; return true; }
         catch { return false; }
     }
+
+    [SkippableTheory]
+    [InlineData("shift", 2)]
+    [InlineData("shift4", 2)]
+    [InlineData("shift4", 3)]
+    public void Shift_MatchesCpu(string shader, int axis)
+    {
+        Skip.IfNot(VkOk(), "no Vulkan device");
+        var dev = VkBackend.Default.Dev;
+        var rng = new Random(6);
+        int c = 16, h = 7, w = 9;
+        int[] ge = [4, 8, 12, 16], of = [-2, -1, 1, 2];
+        float[] x = Rand(rng, h * w * c), cpu = new float[h * w * c];
+        FusedKernels.ChannelShift(x, h, w, c, cpu, new ShiftP { Axis = axis, Offsets = of, GroupEnds = ge });
+        var pcu = new List<uint> { (uint)c, (uint)h, (uint)w, (uint)axis };
+        for (int i = 0; i < 5; i++) pcu.Add((uint)(i < ge.Length ? ge[i] : c));
+        for (int i = 0; i < 5; i++) pcu.Add((uint)(i < of.Length ? of[i] : 0));
+        byte[] pc = new byte[pcu.Count * 4];
+        Buffer.BlockCopy(pcu.ToArray(), 0, pc, 0, pc.Length);
+        uint lanes = shader == "shift4" ? 4u : 1u;
+        float[] got = RunGpu(dev, shader, [x], cpu.Length, pc, ((uint)cpu.Length / lanes + 255) / 256);
+        AssertClose(got, cpu, 1e-6f, shader);
+    }
+
+    [SkippableTheory]
+    [InlineData(3, 16, 2u, 2u)]    // gc tail: relu(skip), bias, sigmoid
+    [InlineData(3, 32, 3u, 2u)]    // + relu(resize)
+    [InlineData(5, 20, 0u, 1u)]    // odd oc, relu act
+    public void UpHead_MatchesCpu(int oc, int c, uint reluFlags, uint act)
+    {
+        Skip.IfNot(VkOk(), "no Vulkan device");
+        var dev = VkBackend.Default.Dev;
+        var rng = new Random(7);
+        int ih = 5, iw = 7, oh = 10, ow = 14;
+        float[] x = Rand(rng, ih * iw * c), skip = Rand(rng, oh * ow * c);
+        float[] w = Rand(rng, oc * c), b = Rand(rng, oc);
+        var p = new UpHeadP
+        {
+            Scales = [1f, 1f, 2f, 2f],
+            ResizeRelu = (reluFlags & 1u) != 0, SkipRelu = (reluFlags & 2u) != 0,
+            Act = act == 2u ? ActivationKind.Sigmoid : act == 1u ? ActivationKind.Relu : ActivationKind.None,
+        };
+        float[] cpu = new float[oh * ow * oc];
+        FusedKernels.UpHead(x, ih, iw, c, skip, cpu, oh, ow, 2f, 2f, p, FusedKernels.PackUpHead(w, oc, c, b));
+
+        uint flags = reluFlags | 4u | (act << 3);
+        byte[] pcb = new byte[36];
+        Buffer.BlockCopy(new uint[] { (uint)c, (uint)ih, (uint)iw, (uint)oh, (uint)ow, (uint)oc, flags }, 0, pcb, 0, 28);
+        Buffer.BlockCopy(new float[] { 2f, 2f }, 0, pcb, 28, 8);
+        float[] got = RunGpu(dev, "uphead", [x, skip, w, b], cpu.Length, pcb, (uint)(oh * ow + 255) / 256);
+        AssertClose(got, cpu, 1e-4f, "uphead");
+    }
 }

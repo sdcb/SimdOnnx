@@ -345,6 +345,17 @@ public sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool Mem
     /// peak, e.g. a detector whose input is live while the first layers' outputs peak.
     /// </summary>
     public bool ReleaseInputs { get; init; }
+    /// <summary>
+    /// Fuse Resize → (Relu) → Add(·, [Relu](skip)) → 1x1 Conv (at most 8 outputs) → (Relu | Sigmoid)
+    /// into one op that never stores the full-resolution intermediates (NHWC plans; e.g. U-Net style
+    /// decoder tails). On by default; the output is the same up to float rounding.
+    /// </summary>
+    public bool FuseUpHead { get; init; } = true;
+    /// <summary>
+    /// Fuse the shift-MLP subgraph (constant Pad → 5-way channel split → per-group roll along H or W →
+    /// Concat → unpad Slice) into one channel-shift op. On by default; the output is identical.
+    /// </summary>
+    public bool FuseChannelShift { get; init; } = true;
     public bool Gpu => Target != PlanTarget.Cpu;
     /// <summary>SIMDONNX_NHWC=0 (or legacy GCDRNET_NHWC=0) forces the all-NCHW plan (A/B oracle).</summary>
     public static bool DefaultNhwc { get; } = Env.Flag("NHWC") != "0";
