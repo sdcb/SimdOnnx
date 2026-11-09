@@ -62,8 +62,12 @@ public static class CpuKernels
                 case ConvP cp when cp.KernelPlan is null:
                 {
                     CValue w = V[n.In[1]];
+                    if (w.Floats is null)
+                        throw new NotSupportedException($"Conv '{n.Name}': run-time weights in an NHWC plan (weights must be constant).");
                     float[]? b = cp.BiasValue >= 0 ? V[cp.BiasValue].Floats : null;
-                    int ic = V[n.In[0]].Shape[1];
+                    // from the weights ([oc, ic/group, kh, kw]): the activation's Shape may be the
+                    // physical NHWC one (e.g. a graph input behind the boundary relayout)
+                    int ic = w.Shape[1] * cp.Group;
                     object kp = Get(cache, n, w.Floats!, b, () =>
                     {
                         NhwcConvPlan p = Nhwc.Pack(w.Floats!, w.Shape, b, cp.Group, ic);

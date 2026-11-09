@@ -46,6 +46,16 @@ internal static class OnnxProtoReader
         return model;
     }
 
+    /// <summary>A standalone serialized TensorProto (e.g. the ONNX backend tests' input_k.pb / output_k.pb).</summary>
+    public static OnnxTensorData ParseTensor(Stream source)
+    {
+        if (source is null) throw new ArgumentNullException(nameof(source));
+        ProtoReader reader = new(source, -1);
+        OnnxTensorData tensor = new();
+        ParseTensor(ref reader, tensor, requireName: false);
+        return tensor;
+    }
+
     private static void ParseOpset(ref ProtoReader reader, OnnxOpsetData result)
     {
         while (reader.TryReadTag(out int field, out int wire))

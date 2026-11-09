@@ -1660,7 +1660,9 @@ internal static class GraphCompiler
                     int axis = (int)n.IntAttr("axis");
                     if (axis < 0) axis += x.Shape.Length;
                     if (x.Shape.Length != 1 || axis != 0) throw new NotSupportedException("Gather eval supports 1-D axis 0.");
-                    Out(idx.Ints!.Select(i => x.Ints![checked((int)i)]).ToArray(), idx.Shape);
+                    long len = x.Ints!.Length;
+                    Out(idx.Ints!.Select(i => i >= -len && i < len ? x.Ints![checked((int)(i < 0 ? i + len : i))]
+                        : throw new InvalidDataException($"Gather '{n.Name}': index {i} out of range {len}.")).ToArray(), idx.Shape);
                     return;
                 }
                 case "Identity":
@@ -1764,6 +1766,8 @@ internal static class GraphCompiler
             CValue x = V(Input(0, n));
             CValue w = V(Input(1, n));
             int[] wd = w.Shape;
+            if (wd.Length != 4 || x.Shape.Length != 4)
+                throw new NotSupportedException($"Conv '{n.Name}': rank {x.Shape.Length} (only 2-D convolution).");
             int[] pads = n.IntsAttr("pads").Select(v => (int)v).ToArray();
             if (pads.Length == 0) pads = new int[2 * (wd.Length - 2)];
             int[] strides = n.IntsAttr("strides").Select(v => (int)v).ToArray();
@@ -1797,7 +1801,7 @@ internal static class GraphCompiler
             if (n.IntAttr("ceil_mode", 0) != 0) throw new NotSupportedException($"{n.OpType} '{n.Name}': ceil_mode.");
             int[] kernel = n.IntsAttr("kernel_shape").Select(v => (int)v).ToArray();
             int[] strides = n.IntsAttr("strides").Select(v => (int)v).ToArray();
-            if (strides.Length == 0) strides = (int[])kernel.Clone();
+            if (strides.Length == 0) strides = Enumerable.Repeat(1, kernel.Length).ToArray();   // ONNX default: 1
             int[] pads = n.IntsAttr("pads").Select(v => (int)v).ToArray();
             if (pads.Length == 0) pads = new int[2 * kernel.Length];
             if (n.IntsAttr("dilations").Any(d => d != 1))
@@ -1886,8 +1890,9 @@ internal static class GraphCompiler
         private void EmitBatchNorm(OnnxNodeData n)
         {
             CValue x = V(Input(0, n));
-            float[] gamma = V(Input(1, n)).Floats!, beta = V(Input(2, n)).Floats!;
-            float[] mean = V(Input(3, n)).Floats!, variance = V(Input(4, n)).Floats!;
+            float[] Const(int i) => V(Input(i, n)).Floats
+                ?? throw new NotSupportedException($"BatchNormalization '{n.Name}': non-constant input {i}.");
+            float[] gamma = Const(1), beta = Const(2), mean = Const(3), variance = Const(4);
             float eps = n.FloatAttr("epsilon", 1e-5f);
             if (n.IntAttr("training_mode") != 0 || n.Outputs.Skip(1).Any(o => o.Length > 0))
                 throw new NotSupportedException($"BatchNormalization '{n.Name}': training mode.");
@@ -2047,6 +2052,17 @@ internal static class GraphCompiler
                 biasV = AddValue(new CValue { Name = n.Name + "__gemm_beta_c", Shape = V(biasV).Shape, DType = 1,
                     Floats = _m.Intern(n.Name + "__gemm_beta_c", c.Select(v => v * beta).ToArray()) });
             }
+            // the kernels add a per-column bias ([N] / [1,N]); any other broadcastable C (scalar, [M,1],
+            // [M,N]) is a separate broadcast Add
+            bool perColumn = biasV < 0 || V(biasV).Shape is { Length: 1 } bs1 && bs1[0] == ncol
+                || V(biasV).Shape is { Length: 2 } bs2 && bs2[0] == 1 && bs2[1] == ncol;
+            if (!perColumn)
+            {
+                int mm = Emit(ExecOp.Gemm, [Input(0, n), Input(1, n)], ActivationValue(n.Outputs[0] + "__gemm_ab", outShape),
+                    new GemmP { TransB = transB, BiasValue = -1 }, n);
+                Emit(ExecOp.Elementwise, [mm, biasV], ActivationValue(n.Outputs[0], outShape), new EwP { Op = EwOp.Add }, n);
+                return;
+            }
             Emit(ExecOp.Gemm, [Input(0, n), Input(1, n)], ActivationValue(n.Outputs[0], outShape),
                 new GemmP { TransB = transB, BiasValue = biasV }, n);
         }
@@ -2064,13 +2080,15 @@ internal static class GraphCompiler
             if (n.Inputs.Count > 3 && n.Inputs[3].Length > 0)
             {
                 // sizes input (int tensor): authoritative output shape
-                long[] sizes = V(Input(3, n)).Ints!;
+                long[] sizes = V(Input(3, n)).Ints
+                    ?? throw new NotSupportedException($"Resize '{n.Name}': non-constant sizes.");
                 sizesI = sizes.Select(s => (int)s).ToArray();
                 scales = sizes.Select((s, i) => (float)s / x.Shape[i]).ToArray();
             }
             else
             {
-                scales = V(Input(2, n)).Floats!;
+                scales = V(Input(2, n)).Floats
+                    ?? throw new NotSupportedException($"Resize '{n.Name}': non-constant scales.");
             }
             if (n.StringAttr("mode") == "nearest")
             {
@@ -2122,7 +2140,7 @@ internal static class GraphCompiler
                 out int[] outShape, out int[] st, out int[] en, out int[] stepI);
             Emit(ExecOp.Slice, [Input(0, n)], ActivationValue(n.Outputs[0], outShape),
                 new SliceP { Starts = st, Ends = en,
-                    Axes = axes.Select(a => (int)a).ToArray(), Steps = stepI }, n);
+                    Axes = axes.Select(a => (int)(a < 0 ? a + x.Shape.Length : a)).ToArray(), Steps = stepI }, n);
         }
 
         [MethodImpl(MethodImplCompat.AggressiveOptimization)]
@@ -2150,9 +2168,9 @@ internal static class GraphCompiler
             else
             {
                 int outputs = (int)n.IntAttr("num_outputs", n.Outputs.Count);
-                int each = x.Shape[axis] / outputs;
-                sizes = Enumerable.Repeat(each, outputs).ToArray();
-                sizes[^1] += x.Shape[axis] - each * outputs;
+                // ONNX: chunks of ceil(dim / outputs), the last one smaller when uneven
+                int each = (x.Shape[axis] + outputs - 1) / outputs;
+                sizes = Enumerable.Range(0, outputs).Select(i => Math.Max(0, Math.Min(each, x.Shape[axis] - i * each))).ToArray();
             }
             // Split is implemented as a per-output Slice at exec time.
             int[] starts = new int[x.Shape.Length];

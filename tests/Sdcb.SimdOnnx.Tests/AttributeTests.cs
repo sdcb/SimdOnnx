@@ -112,4 +112,67 @@ public class AttributeTests
         var ex = Assert.Throws<NotSupportedException>(() => GraphCompiler.Compile(OnnxModel.Load(m), [1, 1, 4, 4]));
         Assert.Contains("align_corners", ex.Message);
     }
+
+    // ---- bugs found by the ONNX node tests ----
+
+    [Fact]
+    public void MaxPool_DefaultStrides_AreOne()
+    {
+        // ONNX: strides default to 1 along each axis (they used to default to the kernel)
+        float[] x = Enumerable.Range(0, 9).Select(i => (float)i).ToArray();
+        byte[] m = new OnnxBuilder().Input("x", 1, 1, 3, 3)
+            .Node("MaxPool", ["x"], ["y"], ("kernel_shape", new[] { 2, 2 })).Output("y").Build();
+        Assert.Equal([4f, 5, 7, 8], Run(m, [1, 1, 3, 3], x));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Slice_NegativeAxis(bool nhwc)
+    {
+        float[] x = Enumerable.Range(0, 2 * 3 * 4).Select(i => (float)i).ToArray();
+        byte[] m = new OnnxBuilder().Input("x", 2, 3, 4)
+            .InitI64("s", [1], 1).InitI64("e", [2], 1).InitI64("a", [-1], 1)
+            .Node("Slice", ["x", "s", "e", "a"], ["y"]).Output("y").Build();
+        Assert.Equal([1f, 5, 9, 13, 17, 21], Run(m, [2, 3, 4], x, nhwc));
+    }
+
+    [Fact]
+    public void Split_NumOutputs_Uneven_UsesCeilChunks()
+    {
+        // opset 18: 5 split 2 ways is [3, 2], not [2, 3]
+        float[] x = [1, 2, 3, 4, 5];
+        byte[] m = new OnnxBuilder().Opset(18).Input("x", 5)
+            .Node("Split", ["x"], ["a", "b"], ("axis", 0), ("num_outputs", 2)).Output("a").Build();
+        Assert.Equal([1f, 2, 3], Run(m, [5], x));
+    }
+
+    [Fact]
+    public void Gemm_FullMatrixBias_Broadcasts()
+    {
+        var rng = new Random(11);
+        float[] b = rng.Array(3 * 2), c = rng.Array(4 * 2), x = rng.Array(4 * 3);
+        byte[] m = new OnnxBuilder().Input("x", 4, 3).Init("B", b, 3, 2).Init("C", c, 4, 2)
+            .Node("Gemm", ["x", "B", "C"], ["y"]).Output("y").Build();
+        float[] y = Run(m, [4, 3], x);
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 2; j++)
+            {
+                float want = c[i * 2 + j];
+                for (int k = 0; k < 3; k++) want += x[i * 3 + k] * b[k * 2 + j];
+                Assert.Equal(want, y[i * 2 + j], 5);
+            }
+    }
+
+    [Fact]
+    public void Conv_RuntimeWeights_NhwcIsRefused()
+    {
+        // weights fed as a graph input: the NCHW kernel reads them at run time, the NHWC kernel needs
+        // them packed up front (it used to pack an empty span and overrun it)
+        byte[] m = new OnnxBuilder().Input("x", 1, 3, 5, 4).Input("W", 2, 3, 3, 3)
+            .Node("Conv", ["x", "W"], ["y"], ("kernel_shape", new[] { 3, 3 })).Output("y").Build();
+        ExecPlan plan = GraphCompiler.Compile(OnnxModel.Load(m), [1, 3, 5, 4], new CompileOptions(Nhwc: true));
+        var ex = Assert.Throws<NotSupportedException>(() => new InferenceSession(plan));
+        Assert.Contains("run-time weights", ex.Message);
+    }
 }

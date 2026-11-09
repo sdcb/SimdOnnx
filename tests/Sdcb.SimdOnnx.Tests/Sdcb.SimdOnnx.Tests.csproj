@@ -10,6 +10,8 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <!-- hardware-intrinsic kernels and GPU backends are net10.0 only -->
     <Compile Remove="Avx512KernelTests.cs;NeonKernelTests.cs;MtlKernelTests.cs;VkKernelTests.cs;VkDebugTests.cs;VkDeviceLossTests.cs;VkRouteTests.cs;GpuOpTests.cs" />
+    <!-- the ONNX conformance manifest is recorded for the net10.0 build -->
+    <Compile Remove="Conformance/**" />
     <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
     <PackageReference Include="System.Text.Json" Version="10.0.0" />
   </ItemGroup>
