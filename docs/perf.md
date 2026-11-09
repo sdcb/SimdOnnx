@@ -106,6 +106,34 @@ What moved the memory (each measured on its own):
 Not the cause, ruled out on this machine: const pool in ReBAR vs device-local memory (peak 1036
 vs 1038 MB).
 
+## SimdPaddleOCR on the public API (2026-11-09)
+
+Ryzen 7 5800X + RTX 3080 Ti, SimdPaddleOCR c71b76d (the bench decodes with SimdCodecs, so exact
+lines differ from the sections above). Old: that commit on the 0.1.0-preview.7 package; new: the
+same commit on the public API (`CpuSession`, `ModelHeads`, `VkBufferPool`, `VkBatch`, …) over the
+engine at 2bd4d9e plus `Reshape(shape, prepare)`. Interleaved runs, median ms per image, all rounds
+of every run pooled:
+
+| case | rounds | old | new | peak MB old / new | exact lines |
+|---|---:|---:|---:|---:|---|
+| tiny CPU 4w | 23 | 48.0 | 46.2 | 654 / 655 | 753 = 753 |
+| small CPU 1w | 23 | 193.8 | 202.5 | 747 / 748 | 934 = 934 |
+| small CPU 4w | 31 | 124.7 | 123.4 | 815 / 816 | 934 = 934 |
+| medium CPU 1w | 3 | 839.0 | 846.8 | 1089 / 1086 | 998 = 998 |
+| medium CPU 4w | 15 | 533.9 | 525.9 | 1202 / 1201 | 998 = 998 |
+| medium CPU 16w | 3 | 784.2 | 785.4 | 1290 / 1299 | 998 = 998 |
+| tiny Vulkan 1w / 4w | 4 / 13 | 16.7 / 16.4 | 16.6 / 16.5 | 767 / 768, 770 / 769 | 753 = 753 |
+| small Vulkan 1w / 4w | 4 | 28.7 / 28.1 | 29.0 / 27.3 | 832 / 832, 817 / 816 | 935 = 935 |
+| medium Vulkan 1w / 4w | 4 / 7 | 39.3 / 39.2 | 38.9 / 38.8 | 988 / 988, 988 / 989 | 997 = 997 |
+
+The compiled plans are identical: `SIMDONNX_DUMP=2` over small det / cls / rec prints the same
+1905 lines on both builds. The machine was noisy during these runs (each side's per-round medians
+are bimodal, e.g. small CPU 1w 175–182 or 197–217 ms on the old build alike), and the deltas change
+sign between runs: small CPU 4w was +3.4%, −0.4%, +1.8%, +2.2%, −2.5%. The tiny CPU 4w and
+small CPU 1w rows are from the last run. Small CPU 1w is the one case leaning slower: two 10-round
+runs give paired per-round differences averaging +2.1 and +4.5 ms (1–2%), with the new build slower
+in 11 of 20 pairs, so it is not separable from the noise here; re-measure it on a quiet machine.
+
 ## Known gaps / next steps
 
 1. **Paddle Vulkan memory**: at or below the old engine on the 3080 Ti (see the 2026-11-09
