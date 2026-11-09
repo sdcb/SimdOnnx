@@ -104,6 +104,12 @@ internal sealed class OnnxTensorData
         }
     }
 
+    /// <summary>Float raw data read straight into its decoded form (the parser's path for float tensors).</summary>
+    internal void SetFloats(float[] floats)
+    {
+        lock (this) { _floats = floats; RawData = null; }
+    }
+
     private float[] DecodeFloats()
     {
         int count = checked((int)ElementCount());

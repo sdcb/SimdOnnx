@@ -229,7 +229,19 @@ internal static class OnnxProtoReader
                 }
                 case 7 when wire == 0: result.Int64Data.Add(unchecked((long)reader.ReadVarint())); break;
                 case 8 when wire == 2: result.Name = reader.ReadString(); break;
-                case 9 when wire == 2: result.RawData = reader.ReadBytes(); break;
+                case 9 when wire == 2:
+                    // float weights straight into the float[] AsFloats hands out: a byte[] copy
+                    // first (one LOH array per weight, dropped on decode) leaves the model's size
+                    // in LOH holes that a compacting GC does not reclaim
+                    if (result.DataType == OnnxTensorData.TypeFloat && BitConverter.IsLittleEndian)
+                    {
+                        reader.ReadFloatsOrBytes(out float[]? floats, out byte[]? bytes);
+                        if (floats is not null) result.SetFloats(floats);
+                        else result.RawData = bytes;
+                    }
+                    else
+                        result.RawData = reader.ReadBytes();
+                    break;
                 case 10 when wire == 2:
                 {
                     var nested = reader.EnterMessage();
@@ -424,6 +436,29 @@ internal static class OnnxProtoReader
             byte[] value = new byte[count];
             ReadExact(value);
             return value;
+        }
+
+        /// <summary>
+        /// A length-delimited field read as little-endian floats when its length is a multiple of 4
+        /// (<paramref name="floats"/>), else as bytes (<paramref name="bytes"/>).
+        /// </summary>
+        public void ReadFloatsOrBytes(out float[]? floats, out byte[]? bytes)
+        {
+            ulong length = ReadVarint();
+            if (length > int.MaxValue) throw new InvalidDataException("Protobuf length-delimited field is too large.");
+            int count = checked((int)length);
+            if (_remaining >= 0 && count > _remaining)
+                throw new InvalidDataException("Protobuf field overruns its message.");
+            if ((count & 3) != 0)
+            {
+                floats = null;
+                bytes = new byte[count];
+                ReadExact(bytes);
+                return;
+            }
+            bytes = null;
+            floats = new float[count / 4];
+            ReadExact(System.Runtime.InteropServices.MemoryMarshal.AsBytes(floats.AsSpan()));
         }
 
         public string ReadString()
