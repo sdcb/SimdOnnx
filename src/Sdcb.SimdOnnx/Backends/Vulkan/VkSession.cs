@@ -175,6 +175,10 @@ public sealed unsafe class VkInferenceSession : IDisposable
     /// <summary>False once the borrowed buffers were regrown by another session (re-create this one).</summary>
     internal bool BuffersCurrent => _shared is null || _shared.Generation == _sharedGen;
 
+    /// <summary>True once another session on the same <see cref="VkBufferPool"/> grew the pool's buffers:
+    /// this session can no longer run (it throws); dispose it and create a new one.</summary>
+    public bool IsStale => !BuffersCurrent;
+
     internal ulong InputOffset => _inOff;
     internal ulong OutputOffset => _outOff;
     internal ulong InputBytes => (ulong)_inFloats * (ulong)_es;
@@ -536,7 +540,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
 
     /// <summary>Stage the input and submit without waiting (pair with <see cref="Wait"/>); the host
     /// may meanwhile work on other data, but not touch this session's (or its shared) buffers.</summary>
-    internal void Submit()
+    public void Submit()
     {
         if (!BuffersCurrent) throw new InvalidOperationException("Shared Vulkan buffers were regrown; recreate the session.");
         // staging is fp32 in both modes (fp16 sessions convert on the device)
@@ -545,7 +549,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
     }
 
     /// <summary>Wait for the submitted run and read the output back.</summary>
-    internal void Wait()
+    public void Wait()
     {
         _dev.WaitFence(_fence);
         _stageOut.Invalidate(0, StageOutBytes);

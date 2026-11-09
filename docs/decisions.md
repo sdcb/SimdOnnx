@@ -17,6 +17,27 @@ freeze types that are still moving. Instead the core grants `InternalsVisibleTo`
 reference an exact version (`[x.y.z]`) so a mismatched internal API cannot load.
 Revisit when a third-party extension is needed.
 
+**Superseded for SimdPaddleOCR (2026-11-09):** it now builds against the public API only, and its
+`InternalsVisibleTo` grant is gone (its test / bench assemblies keep theirs). What it used
+internals for became generic public features:
+
+- `CpuModel` / `CpuSession`: per-shape plans with shared packed weights, output variants
+  (`WithOutput`) that run on the input already written, one grow-only arena per session. Graph input
+  0 at arena offset 0 is now an engine invariant (`CpuSession` checks it).
+- `ModelHeads.FindSoftmaxHead`: the Softmax tail and its constant linear layer, matched on the
+  compiled plan.
+- `EngineProfiler`, `GpuDeviceInfo` (`VkBackend.Device` / `MetalBackend.Device`, `TryGetDefault`,
+  `IsLost`), `OnnxModel.Nodes` / `TryGetInitializerShape`.
+- Vulkan: `VkBufferPool` (sessions sharing device buffers; growing makes earlier sessions
+  `IsStale`), public `Submit` / `Wait`, `VkBackend.OutputShape` / `Prefetch`, and `VkBatch`, a thin
+  facade over the wave-split multi-unit runner. The batch wraps the runner instead of exposing a
+  command-recording API: the runner's level-interleaved recording is what makes batched CTC fast,
+  and a raw recording API would freeze the device layer.
+
+A/B against the preview.7 build of the same SimdPaddleOCR commit (5800X + 3080 Ti) is in the
+"public API" section of `docs/perf.md`. SimdGcdrNet still uses internals (fused GPU pipeline,
+kernel helpers in its extension ops); moving it is the next step.
+
 ## 2026-10-13 — GCDR glue stays in SimdGcdrNet
 
 `bgr2nhwc` / `div6` / `nhwc2bgr` shaders, `Vk/MtlGcdrPipeline` and `PixelOps` are GCDR-specific and

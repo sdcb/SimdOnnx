@@ -74,6 +74,9 @@ internal sealed unsafe class VkUnitRunner : IDisposable
         if (_units.Count > last) _waveEnd.Add(_units.Count);
     }
 
+    /// <summary>One past the last unit of wave <paramref name="wave"/>.</summary>
+    internal int WaveEnd(int wave) => _waveEnd[wave];
+
     internal int WaveOf(int unit)
     {
         for (int w = 0; w < _waveEnd.Count; w++)

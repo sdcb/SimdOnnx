@@ -14,6 +14,20 @@ public sealed class OnnxModel
     internal OnnxGraphData Graph { get; }
     internal Dictionary<string, OnnxTensorData> Initializers { get; }
 
+    private IReadOnlyList<OnnxNodeInfo>? _nodes;
+
+    /// <summary>The graph's nodes in topological order, after the load-time rewrites (Constant nodes
+    /// become initializers, Conv + BatchNormalization folds). Read-only.</summary>
+    public IReadOnlyList<OnnxNodeInfo> Nodes => _nodes ??= Graph.Nodes
+        .Select(n => new OnnxNodeInfo(n.OpType, n.Name, n.Inputs.ToArray(), n.Outputs.ToArray())).ToArray();
+
+    /// <summary>Dims of initializer <paramref name="name"/> (a constant tensor such as conv weights).</summary>
+    public bool TryGetInitializerShape(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out int[]? dims)
+    {
+        dims = Initializers.TryGetValue(name, out OnnxTensorData? t) ? t.DimsArray() : null;
+        return dims is not null;
+    }
+
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, float[]> _derived = new(StringComparer.Ordinal);
 
     /// <summary>

@@ -17,12 +17,26 @@ public sealed class MetalBackend : IDisposable
     private static readonly Lazy<MetalBackend> s_default = new(() => new MetalBackend());
     public static MetalBackend Default => s_default.Value;
 
+    /// <summary>The device's capabilities.</summary>
+    public GpuDeviceInfo Device { get; }
+
+    /// <summary><see cref="Default"/>, or false off macOS or when no Metal device exists.</summary>
+    public static bool TryGetDefault([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out MetalBackend? backend)
+    {
+        try { backend = OperatingSystem.IsMacOS() ? Default : null; }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { backend = null; }
+        return backend is not null;
+    }
+
     public static CompileOptions PlanOptions => new(Nhwc: true, PhysicalIo: false, Target: PlanTarget.Metal);
     public static CompileOptions PipeOptions => new(Nhwc: true, PhysicalIo: true, Target: PlanTarget.Metal);
 
     internal MetalBackend()
     {
         Dev = MtlDevice.Probe() ?? throw new PlatformNotSupportedException("Metal: no device");
+        // Apple GPUs: fp16 storage, 32-lane simdgroups, unified memory
+        Device = new GpuDeviceInfo(Dev.Name, 0, Fp16Storage: true, CooperativeMatrixFp16: false,
+            SubgroupSizeMin: 32, SubgroupSizeMax: 32, UnifiedMemory: true, DeviceLocalBytes: 0);
         if (Environment.GetEnvironmentVariable("GCDRNET_MTL_VERBOSE") == "1")
             Console.Error.WriteLine($"[metal] device: {Dev.Name}");
     }

@@ -60,6 +60,29 @@ public sealed unsafe class VkBackend : IDisposable
     internal VkBackend()
     {
         Dev = VkDevice.Create();
+        Device = new GpuDeviceInfo(Dev.DeviceName, Dev.VendorId, Dev.StorageBuffer16 && Env.Flag("VK_F16") != "0",
+            Dev.CoopMat16, (int)Dev.SubgroupMin, (int)Dev.SubgroupMax, Dev.UnifiedMemory, Dev.DeviceLocalHeap);
+    }
+
+    /// <summary>The device's capabilities.</summary>
+    public GpuDeviceInfo Device { get; }
+
+    /// <summary>True once the device reported a loss: everything made on this backend is dead, and
+    /// <see cref="Default"/> hands out a new backend.</summary>
+    public bool IsLost => Dev.Lost;
+
+    /// <summary><see cref="Default"/>, or false when no usable Vulkan device exists (the failure is cached).</summary>
+    public static bool TryGetDefault([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out VkBackend? backend)
+    {
+        try
+        {
+            backend = OperatingSystem.IsBrowser() || OperatingSystem.IsWasi() ? null : Default;
+        }
+        catch (Exception ex) when (ex is not VkDeviceLostException and not OutOfMemoryException)
+        {
+            backend = null;
+        }
+        return backend is not null;
     }
 
     /// <summary>Standalone session for one model at [n,c,h,w] (test path).</summary>
@@ -119,7 +142,7 @@ public sealed unsafe class VkBackend : IDisposable
     /// below-normal-priority threads: they use the cores while callers wait on the device instead of
     /// competing with the callers' own pre/post-processing.
     /// </summary>
-    internal void Prefetch(OnnxModel m, int[] shape, CompileOptions opt)
+    public void Prefetch(OnnxModel m, int[] shape, CompileOptions opt)
     {
         opt = opt with { Target = PlanTarget.Vulkan, Nhwc = true };
         var key = (m, string.Join("x", shape), opt);
@@ -179,10 +202,33 @@ public sealed unsafe class VkBackend : IDisposable
     /// <summary>Session over the graph for <paramref name="shape"/> under explicit plan options.</summary>
     /// <summary>A session over the graph of <paramref name="m"/> at <paramref name="shape"/> under
     /// <paramref name="options"/> (Target / NHWC are forced; extensions via <see cref="CompileOptions.Extensions"/>).</summary>
-    public VkInferenceSession NewSession(OnnxModel m, int[] shape, CompileOptions options) => NewSession(m, shape, options, null);
+    public VkInferenceSession NewSession(OnnxModel m, int[] shape, CompileOptions options) => NewSession(m, shape, options, (VkSessionBuffers?)null);
 
     /// <summary>The device's name (e.g. "Intel(R) Arc(TM) B580 Graphics").</summary>
     public string DeviceName => Dev.DeviceName;
+
+    /// <summary>A session that runs in <paramref name="pool"/>'s buffers instead of its own (see
+    /// <see cref="VkBufferPool"/>).</summary>
+    public VkInferenceSession NewSession(OnnxModel m, int[] shape, CompileOptions options, VkBufferPool pool)
+    {
+        if (pool is null) throw new ArgumentNullException(nameof(pool));
+        if (!ReferenceEquals(pool.Backend, this)) throw new ArgumentException("The pool belongs to another backend.", nameof(pool));
+        return NewSession(m, shape, options, pool.Buffers);
+    }
+
+    /// <summary>Shared device buffers for sessions that run one at a time.</summary>
+    public VkBufferPool CreateBufferPool() => new(this);
+
+    /// <summary>A reusable multi-unit submission.</summary>
+    public VkBatch CreateBatch() => new(this);
+
+    /// <summary>Output shape of <paramref name="m"/> at <paramref name="shape"/> under <paramref name="options"/>
+    /// (builds and caches the graph; no session or device buffers).</summary>
+    public int[] OutputShape(OnnxModel m, int[] shape, CompileOptions options)
+    {
+        ExecPlan p = GraphFor(m, shape, options).Plan;
+        return (int[])p.Values[p.OutputValue].Shape.Clone();
+    }
 
     internal VkInferenceSession NewSession(OnnxModel m, int[] shape, CompileOptions opt, VkSessionBuffers? shared)
     {
