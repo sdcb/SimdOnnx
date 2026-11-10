@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// Image session input: interleaved u8 (3 or 4 bytes per pixel) -> NHWC [oh][ow][3], each byte
+// mapped through the normalization table lut[c * 256 + v] (tensor channel c), replicate padding
+// (the image sits at (pt, pl)). 2D grid: x = output column, y = output row.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Src { uint src[]; };    // packed u8
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
+layout(set = 0, binding = 2) readonly buffer Lut { float lut[]; };   // [3][256]
+
+layout(push_constant) uniform PC {
+    uint oh, ow;        // tensor dims
+    uint ih, iw;        // image dims
+    uint pt, pl;        // image position in the tensor
+    uint stride;        // source row stride in bytes
+    uint bpp;           // 3 or 4 bytes per pixel
+    uint swap;          // 1: tensor channel 0 is byte 2 of a pixel
+} p;
+
+uint fetchByte(uint i) { return (src[i >> 2] >> ((i & 3u) * 8u)) & 0xFFu; }
+
+void main()
+{
+    uint ox = gl_GlobalInvocationID.x;
+    if (ox >= p.ow) return;
+    uint oy = gl_GlobalInvocationID.y;
+    uint sy = uint(clamp(int(oy) - int(p.pt), 0, int(p.ih) - 1));
+    uint sx = uint(clamp(int(ox) - int(p.pl), 0, int(p.iw) - 1));
+    uint s = sy * p.stride + sx * p.bpp, d = (oy * p.ow + ox) * 3u;
+    uint ob = p.swap * 2u;
+    o[d] = ET(lut[fetchByte(s + ob)]);
+    o[d + 1u] = ET(lut[256u + fetchByte(s + 1u)]);
+    o[d + 2u] = ET(lut[512u + fetchByte(s + 2u - ob)]);
+}

@@ -259,6 +259,7 @@ internal static class GraphCompiler
             {
                 if (opt.FuseChannelShift) FuseShiftPass.Instance.Run(ctx);
                 if (opt.FuseUpHead) FuseUpHeadPass.Instance.Run(ctx);
+                if (opt.FuseSafeDiv) FuseSafeDivPass.Instance.Run(ctx);
             }
             else if (opt.FuseUpHead) UpHeadSkipRecomputePass.Instance.Run(ctx);
             if (opt.Extensions is not { } ext) return;

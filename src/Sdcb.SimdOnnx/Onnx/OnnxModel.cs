@@ -79,6 +79,14 @@ public sealed class OnnxModel
         }
     }
 
+    /// <summary>A model over a graph assembled in memory (<see cref="OnnxModelBuilder"/>).</summary>
+    internal static OnnxModel FromGraph(int opset, OnnxGraphData graph)
+    {
+        var data = new OnnxModelData { Graph = graph };
+        data.Opsets.Add(new OnnxOpsetData { Domain = "", Version = opset });
+        return Build(data);
+    }
+
     private static OnnxModel Build(OnnxModelData parsed)
     {
         OnnxGraphData g = parsed.Graph!;

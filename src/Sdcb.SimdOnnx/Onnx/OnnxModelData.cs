@@ -153,6 +153,22 @@ internal sealed class OnnxTensorData
         throw new InvalidDataException($"Tensor '{Name}' has no float-readable data.");
     }
 
+    /// <summary>The same tensor under another name; decoded float data is shared, not copied.</summary>
+    internal OnnxTensorData Renamed(string name)
+    {
+        var t = new OnnxTensorData { Name = name, DataType = DataType };
+        t.Dims.AddRange(Dims);
+        if (DataType == TypeFloat)
+        {
+            t.SetFloats(AsFloats());
+            return t;
+        }
+        lock (this) t.RawData = RawData;
+        t.FloatData.AddRange(FloatData); t.Int32Data.AddRange(Int32Data); t.Int64Data.AddRange(Int64Data);
+        t.StringData.AddRange(StringData); t.DoubleData.AddRange(DoubleData); t.UInt64Data.AddRange(UInt64Data);
+        return t;
+    }
+
     /// <summary>Decodes this tensor to an int64 array.</summary>
     public long[] AsInt64s()
     {

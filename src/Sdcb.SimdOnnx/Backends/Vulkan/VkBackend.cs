@@ -219,6 +219,11 @@ public sealed unsafe class VkBackend : IDisposable
     /// <summary>Shared device buffers for sessions that run one at a time.</summary>
     public VkBufferPool CreateBufferPool() => new(this);
 
+    /// <summary>An image-to-image session over <paramref name="model"/> (pixels in, pixels out, one submit
+    /// per image); see <see cref="VkImageSession"/>.</summary>
+    public VkImageSession CreateImageSession(OnnxModel model, Imaging.ImageSessionOptions? options = null) =>
+        new(this, model, options);
+
     /// <summary>A reusable multi-unit submission.</summary>
     public VkBatch CreateBatch() => new(this);
 

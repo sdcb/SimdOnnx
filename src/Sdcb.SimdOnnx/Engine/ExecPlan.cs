@@ -356,6 +356,11 @@ public sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool Mem
     /// Concat → unpad Slice) into one channel-shift op. On by default; the output is identical.
     /// </summary>
     public bool FuseChannelShift { get; init; } = true;
+    /// <summary>
+    /// Fuse Clip(Div(a, Clip(b, min = eps &gt; 0)), lo, hi), a guarded division, into one op that GPUs
+    /// compute in fp32 (no fp16 rounding of max(b, eps) in between). On by default.
+    /// </summary>
+    public bool FuseSafeDiv { get; init; } = true;
     public bool Gpu => Target != PlanTarget.Cpu;
     /// <summary>SIMDONNX_NHWC=0 (or legacy GCDRNET_NHWC=0) forces the all-NCHW plan (A/B oracle).</summary>
     public static bool DefaultNhwc { get; } = Env.Flag("NHWC") != "0";

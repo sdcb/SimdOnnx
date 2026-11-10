@@ -1,9 +1,7 @@
 using System.Runtime.CompilerServices;
 
-// SimdGcdrNet still builds against engine internals (fused GPU pipeline, kernel helpers) and pins an
-// exact Sdcb.SimdOnnx version, so internal changes cannot skew at runtime. SimdPaddleOCR uses the
-// public API only (docs/decisions.md).
-[assembly: InternalsVisibleTo("Sdcb.SimdGcdrNet")]
+// Shipped libraries (SimdPaddleOCR, SimdGcdrNet) use the public API only (docs/decisions.md); only
+// test, benchmark and device-runner assemblies see the internals.
 [assembly: InternalsVisibleTo("Sdcb.SimdOnnx.Tests")]
 [assembly: InternalsVisibleTo("Sdcb.SimdOnnx.Bench")]
 // consumers' own test / bench / device-runner assemblies drive the engine directly

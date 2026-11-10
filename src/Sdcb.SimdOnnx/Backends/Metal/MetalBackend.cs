@@ -104,5 +104,10 @@ public sealed class MetalBackend : IDisposable
         finally { g.Release(); }
     }
 
+    /// <summary>An image-to-image session over <paramref name="model"/> (pixels in, pixels out, one command
+    /// buffer per image); see <see cref="MtlImageSession"/>.</summary>
+    public MtlImageSession CreateImageSession(OnnxModel model, Imaging.ImageSessionOptions? options = null) =>
+        new(this, model, options);
+
     public void Dispose() => Dev.Dispose();
 }

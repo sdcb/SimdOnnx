@@ -10,7 +10,7 @@ namespace Sdcb.SimdOnnx.Tests;
 /// plan, and that they leave the PP-OCR plans untouched.</summary>
 public class FusionTests
 {
-    private static readonly CompileOptions NoBuiltIns = new(Nhwc: true) { FuseUpHead = false, FuseChannelShift = false };
+    private static readonly CompileOptions NoBuiltIns = new(Nhwc: true) { FuseUpHead = false, FuseChannelShift = false, FuseSafeDiv = false };
 
     private static int Count(ExecPlan p, string ext) => p.Nodes.Count(n => n.Ext?.Name == ext);
 
@@ -120,6 +120,66 @@ public class FusionTests
         }
     }
 
+    /// <summary>y = clamp(a / max(b, 1e-6), 0, 1) over two [1, 3, 5, 7] inputs.</summary>
+    private static OnnxModel SafeDivModel() => OnnxModel.Load(new OnnxBuilder().Opset(18)
+        .Input("a", 1, 3, 5, 7).Input("b", 1, 3, 5, 7)
+        .Init("eps", [1e-6f]).Init("zero", [0f]).Init("one", [1f])
+        .Node("Clip", ["b", "eps", ""], ["e"]).Node("Div", ["a", "e"], ["q"]).Node("Clip", ["q", "zero", "one"], ["y"])
+        .Output("y").Build());
+
+    private static (float[] a, float[] b) SafeDivInputs()
+    {
+        var rng = new Random(3);
+        float[] a = rng.Array(105).Select(Math.Abs).ToArray(), b = rng.Array(105).Select(Math.Abs).ToArray();
+        // divisors at and below the floor: 0, a subnormal-in-fp16 value, the floor itself, negative
+        b[0] = 0; b[1] = 1e-7f; b[2] = 1e-6f; b[3] = -0.5f; a[4] = 0; b[4] = 0;
+        return (a, b);
+    }
+
+    private static float Want(float a, float b) => Math.Clamp(a / Math.Max(b, 1e-6f), 0f, 1f);
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SafeDiv_FusesAndMatchesTheOps(bool nhwc)
+    {
+        OnnxModel m = SafeDivModel();
+        var (a, b) = SafeDivInputs();
+        var opt = new CompileOptions(nhwc) { InputShapes = [[1, 3, 5, 7]] };
+        float[] Run(CompileOptions o, out ExecPlan p)
+        {
+            p = GraphCompiler.Compile(m, [1, 3, 5, 7], o);
+            using var s = new InferenceSession(p);
+            a.CopyTo(s.Input);
+            b.CopyTo(s.GetInput(1));
+            s.Run();
+            return s.Output.ToArray();
+        }
+        float[] fused = Run(opt, out ExecPlan fp), plain = Run(opt with { FuseSafeDiv = false }, out ExecPlan pp);
+        Assert.Equal(1, Count(fp, "SafeDiv"));
+        Assert.DoesNotContain(fp.Nodes, n => n.Op is ExecOp.Clip or ExecOp.Elementwise);
+        Assert.Equal(0, Count(pp, "SafeDiv"));
+        Assert.Equal(plain, fused);
+        for (int i = 0; i < a.Length; i++) Assert.Equal(Want(a[i], b[i]), fused[i]);
+    }
+
+#if NET
+    [SkippableFact]
+    public void SafeDiv_Vulkan_KeepsTheFloorOnFp16()
+    {
+        Skip.IfNot(Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.TryGetDefault(out var vk), "no Vulkan device");
+        var (a, b) = SafeDivInputs();
+        var opt = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.PlanOptions with { InputShapes = [[1, 3, 5, 7]] };
+        using var s = vk!.NewSession(SafeDivModel(), [1, 3, 5, 7], opt);
+        a.CopyTo(s.GetInput(0));
+        b.CopyTo(s.GetInput(1));
+        s.Run();
+        float[] got = s.Output.ToArray();
+        for (int i = 0; i < a.Length; i++)
+            Assert.True(MathF.Abs(got[i] - Want(a[i], b[i])) <= 2e-3f, $"[{i}] a={a[i]} b={b[i]}: {got[i]} vs {Want(a[i], b[i])}");
+    }
+#endif
+
     /// <summary>SimdPaddleOCR's checkout (sibling repo locally, ./SimdPaddleOCR in CI) or SIMDONNX_PADDLE_MODELS.</summary>
     private static string? PaddleModelDir()
     {
@@ -160,7 +220,7 @@ public class FusionTests
             OnnxModel m = OnnxModel.Load(f);
             var opt = new CompileOptions(Nhwc: true, Target: target);
             string on = Signature(GraphCompiler.Compile(m, shape, opt));
-            string off = Signature(GraphCompiler.Compile(m, shape, opt with { FuseUpHead = false, FuseChannelShift = false }));
+            string off = Signature(GraphCompiler.Compile(m, shape, opt with { FuseUpHead = false, FuseChannelShift = false, FuseSafeDiv = false }));
             Assert.True(on == off, $"{n}: the built-in fusions changed the {target} plan");
         }
     }

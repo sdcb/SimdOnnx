@@ -31,6 +31,31 @@ internal sealed class UpHeadPlan
 /// </summary>
 internal static unsafe partial class FusedKernels
 {
+    /// <summary>dst = clamp(a / max(b, eps), lo, hi) (<see cref="SafeDivOp"/>), in bands of 64K elements.</summary>
+    public static void SafeDiv(ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> dst, float eps, float lo, float hi)
+    {
+        int n = dst.Length;
+        if (a.Length < n || b.Length < n) throw new ArgumentException("SafeDiv: operand shorter than the output.");
+        const int Band = 1 << 16;
+        fixed (float* pa = a, pb = b, pd = dst)
+        {
+            float* ca = pa, cb = pb, cd = pd;
+            Par.For(0, (n + Band - 1) / Band, t =>
+            {
+                int i = t * Band, end = Math.Min(n, i + Band), vl = Vector<float>.Count;
+                var ve = new Vector<float>(eps);
+                var vlo = new Vector<float>(lo);
+                var vhi = new Vector<float>(hi);
+                for (; i + vl <= end; i += vl)
+                {
+                    var q = Unsafe.ReadUnaligned<Vector<float>>(ca + i) / Vector.Max(Unsafe.ReadUnaligned<Vector<float>>(cb + i), ve);
+                    Unsafe.WriteUnaligned(cd + i, Vector.Min(Vector.Max(q, vlo), vhi));
+                }
+                for (; i < end; i++) cd[i] = Math.Min(Math.Max(ca[i] / Math.Max(cb[i], eps), lo), hi);
+            });
+        }
+    }
+
     private static readonly ParallelOptions s_po = new() { MaxDegreeOfParallelism = Avx2Kernels.Threads };
 
     /// <summary>Packs UpHead weights [oc, c, 1, 1] as [c][8] (oc lanes, zero-padded) + bias[8].</summary>

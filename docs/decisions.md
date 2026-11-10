@@ -35,13 +35,34 @@ internals for became generic public features:
   and a raw recording API would freeze the device layer.
 
 A/B against the preview.7 build of the same SimdPaddleOCR commit (5800X + 3080 Ti) is in the
-"public API" section of `docs/perf.md`. SimdGcdrNet still uses internals (fused GPU pipeline,
-kernel helpers in its extension ops); moving it is the next step.
+"public API" section of `docs/perf.md`.
+
+**Superseded for SimdGcdrNet (2026-11-10):** it uses the public API only too, so no shipped library
+has an `InternalsVisibleTo` grant any more (consumers' test / bench / device-runner assemblies keep
+theirs). What it used internals for:
+
+- Its fusions (UpHead: Resize → Add → 1x1 conv tail; ChannelShift: the shift-MLP subgraph) are engine
+  built-ins, on in every NHWC plan (`CompileOptions.FuseUpHead` / `FuseChannelShift`); a test proves
+  they leave the PP-OCR plans unchanged.
+- `OnnxModelBuilder` composes GC-Net, the division glue and DR-Net into one model (one plan, one
+  arena; inlined weights are shared, not copied). The glue `Clip(Div(x, Clip(s, eps)), 0, 1)` fuses
+  into one built-in op (`FuseSafeDiv`) that GPUs compute in fp32.
+- `VkImageSession` / `MtlImageSession`: pixels in, pixels out, with normalization, padding, cropping
+  and alpha pass-through done by shaders in the model's command buffer (one submit per image),
+  size-agnostic with grow-only budgeted buffers.
+
+A/B against the C1 build (5800X + 3080 Ti, 1600x1152): CPU 162 vs 169 ms and Vulkan 9.1 vs 9.8 ms
+(medians of 8 interleaved runs); the mixed-size realdae corpus is at parity on Vulkan and ~3% slower
+on CPU (within the 5% the maintainer allowed for SimdGcdrNet). Outputs hash-identical on Vulkan;
+same PSNR, peak working set and device memory.
 
 ## 2026-10-13 — GCDR glue stays in SimdGcdrNet
 
 `bgr2nhwc` / `div6` / `nhwc2bgr` shaders, `Vk/MtlGcdrPipeline` and `PixelOps` are GCDR-specific and
 were not copied into the core.
+
+**Reversed (2026-11-10):** the glue became generic engine features (the composed model and the image
+sessions above); SimdGcdrNet's own pipelines, glue shaders and `PixelOps` are deleted.
 
 ## 2026-10-13 — netstandard2.0: polyfills, not a separate kernel set
 

@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// SafeDiv: o = clamp(a / max(b, eps), lo, hi), elementwise. Computed in fp32: with fp16 storage a
+// stored max(b, eps) could flush a subnormal eps to zero.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer A { ET a[]; };
+layout(set = 0, binding = 1) readonly buffer B { ET b[]; };
+layout(set = 0, binding = 2) writeonly buffer O { ET o[]; };
+
+layout(push_constant) uniform PC { uint n; float eps, lo, hi; } p;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+    o[i] = ET(clamp(float(a[i]) / max(float(b[i]), p.eps), p.lo, p.hi));
+}
