@@ -10,7 +10,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// variants (<see cref="WithOutput"/>) are the same graph truncated at another tensor and share
 /// those packed weights too. Thread-safe; share one instance between sessions.
 /// </summary>
-public sealed class CpuModel
+internal sealed class CpuModel
 {
     private readonly Dictionary<string, (Lazy<ExecPlan> plan, long used)> _plans = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CpuModel> _variants = new(StringComparer.Ordinal);
@@ -26,6 +26,9 @@ public sealed class CpuModel
     {
     }
 
+    /// <param name="model">model to compile.</param>
+    /// <param name="options">plan options; null = the CPU defaults.</param>
+    /// <param name="capacity">most per-shape plans kept.</param>
     /// <param name="packs">Packed-weight cache to share with other CPU models of the same graph
     /// (e.g. a head-truncated variant); null = private.</param>
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
@@ -120,7 +123,7 @@ public sealed class CpuModel
 /// </summary>
 /// <remarks>With <see cref="CompileOptions.ReleaseInputs"/> a run may overwrite the input: write
 /// <see cref="Input"/> again before every <see cref="Run"/>.</remarks>
-public sealed unsafe class CpuSession : IDisposable
+internal sealed unsafe class CpuSession : IDisposable
 {
     private readonly CpuModel _model;
     private (CpuModel Model, InferenceSession Session)[] _bound = [];
@@ -138,7 +141,7 @@ public sealed unsafe class CpuSession : IDisposable
     /// <summary>Intra-op thread budget of each run (0 = process default).</summary>
     public int Threads { get; set; }
 
-    /// <summary>Current input shape (empty before <see cref="Reshape"/>).</summary>
+    /// <summary>Current input shape (empty before <see cref="Reshape(ReadOnlySpan{int})"/>).</summary>
     public ReadOnlySpan<int> InputShape => _shape;
 
     /// <summary>Bytes of the native arena (grows, never shrinks, until disposed).</summary>

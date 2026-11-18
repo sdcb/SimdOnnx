@@ -10,7 +10,7 @@ namespace Sdcb.SimdOnnx.Backends.Metal;
 /// model. All buffers are shared memory, so staging is a copy into a mapped buffer. Any image size;
 /// grow-only buffers within <see cref="ArenaBudget"/>. Not thread-safe. Preview API.
 /// </summary>
-public sealed unsafe class MtlImageSession : IDisposable
+internal sealed unsafe class MtlImageSession : IDisposable
 {
     private const int Es = 2;              // fp16 storage
     private readonly MetalBackend _be;

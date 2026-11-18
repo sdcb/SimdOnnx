@@ -6,9 +6,9 @@ namespace Sdcb.SimdOnnx.Backends.Vulkan;
 
 /// <summary>
 /// Process-wide Vulkan device + per-(model,size) compiled graph cache.
-/// Constructed lazily on first Vulkan <see cref="GcdrEnhancer"/> use.
+/// Constructed lazily on first Vulkan use.
 /// </summary>
-public sealed unsafe class VkBackend : IDisposable
+internal sealed unsafe class VkBackend : IDisposable
 {
     internal readonly VkDevice Dev;
     // (model, shape, options) -> compiled graph (dispatch list; weights live in the per-model const store)
@@ -137,7 +137,7 @@ public sealed unsafe class VkBackend : IDisposable
     private readonly ConcurrentDictionary<(OnnxModel m, string shape, CompileOptions opt), Lazy<VkGraphModel>> _building = new();
 
     /// <summary>
-    /// Starts building the graph of an upcoming shape in the background (a <see cref="GraphFor"/>
+    /// Starts building the graph of an upcoming shape in the background (a <see cref="GraphFor(OnnxModel, int[], CompileOptions)"/>
     /// of the same key then waits for that build instead of starting its own). Builds run on a few
     /// below-normal-priority threads: they use the cores while callers wait on the device instead of
     /// competing with the callers' own pre/post-processing.
@@ -185,7 +185,7 @@ public sealed unsafe class VkBackend : IDisposable
     private const int MaxGraphs = 256;
     private long _clock;
 
-    /// <summary><see cref="GraphFor"/> plus a caller reference. Retries when a concurrent
+    /// <summary><see cref="GraphFor(OnnxModel, int[], CompileOptions)"/> plus a caller reference. Retries when a concurrent
     /// eviction freed the cached graph between lookup and acquire (never resurrects it).</summary>
     internal VkGraphModel AcquireGraph(OnnxModel m, int[] shape, bool physIo, EngineExtensions? ext = null) =>
         AcquireGraph(m, shape, (physIo ? PipeOptions : PlanOptions) with { Extensions = ext });

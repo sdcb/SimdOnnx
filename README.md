@@ -1,4 +1,4 @@
-# Sdcb.SimdOnnx [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdOnnx.svg)](https://www.nuget.org/packages/Sdcb.SimdOnnx) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+# Sdcb.SimdOnnx [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 <img src="assets/icon.svg" width="96" align="right" alt="icon" />
 
@@ -23,8 +23,21 @@ Targets `net10.0` and `netstandard2.0` (CPU only, `Vector<T>` and scalar kernels
 
 ## Status
 
-Pre-release. The public API is minimal (`OnnxModel`, `CompiledModel`, `InferenceSession`);
-engine internals are shared with the first-party consumers above, which pin an exact version.
+A source library, not a NuGet package. Every type is `internal`: consumers take this repository as a
+git submodule and compile the engine into their own assembly, so each consumer package carries its own
+copy and applications can use several of them without a shared version to agree on
+([docs/decisions.md](docs/decisions.md), 2026-11-18).
+
+To embed it, import the source props from a project that targets `net10.0` and/or `netstandard2.0`
+and allows unsafe blocks:
+
+```xml
+<Import Project="external/SimdOnnx/src/Sdcb.SimdOnnx/Sdcb.SimdOnnx.Sources.props" />
+```
+
+It adds the engine's `.cs` files (with the per-target exclusions), the Vulkan / Metal shaders as
+embedded resources under their usual names, and the netstandard2.0 polyfill packages. The consumer's
+own `InternalsVisibleTo` grants then cover its test and bench assemblies.
 
 ## Performance
 

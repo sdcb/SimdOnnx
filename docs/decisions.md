@@ -17,6 +17,9 @@ freeze types that are still moving. Instead the core grants `InternalsVisibleTo`
 reference an exact version (`[x.y.z]`) so a mismatched internal API cannot load.
 Revisit when a third-party extension is needed.
 
+**Superseded (2026-11-18):** the engine is no longer a package; see "Source-embedded via submodule,
+all types internal" below.
+
 **Superseded for SimdPaddleOCR (2026-11-09):** it now builds against the public API only, and its
 `InternalsVisibleTo` grant is gone (its test / bench assemblies keep theirs). What it used
 internals for became generic public features:
@@ -258,3 +261,30 @@ second model leans on it. The SpaceToDepth recognizer verifies the reshape / tra
 map (every output axis swept plus 4k pseudo-random points) instead of matching exporter-specific
 reshape constants. A customer PR with the same four ops for CPU + Vulkan (sdcb/SimdOnnx#6) was closed
 in favour of this superset (Metal, DCR, multi-input).
+
+## 2026-11-18 — Source-embedded via submodule, all types internal
+
+The engine stops shipping as the `Sdcb.SimdOnnx` package. SimdPaddleOCR and SimdGcdrNet take this
+repository as a git submodule (`external/SimdOnnx`) and import `src/Sdcb.SimdOnnx/Sdcb.SimdOnnx.Sources.props`,
+which compiles the engine into their own assembly; every engine type is `internal`.
+
+Why:
+
+- Both consumers pinned exact versions (`[0.1.0-preview.8]` and `[0.1.0-preview.9]`), so an application
+  that used both failed to restore. Loosening the pin would have required a stable public API.
+- The public surface that replaced `InternalsVisibleTo` (`CpuSession`, `VkBatch`, `VkBufferPool`,
+  `VkImageSession`, `OnnxModelBuilder`, `CompileOptions.Fuse*`, …) is consumer orchestration that still
+  moves. Publishing it meant semver for every change, which held back new operators and fusions.
+
+Cost: each consumer package carries its own engine (net10.0 ~1.9 MB, netstandard2.0 ~0.4 MB), and two
+consumers in one process initialize the Vulkan device and their thread pools twice. A consumer that does
+not bump its submodule stays on an older engine; that is a missed optimization, never a load failure.
+
+Kept here: kernel / conformance / GPU tests, the bench and the device matrix, so a fix or an operator
+lands once. The former public-API tests moved into `tests/Sdcb.SimdOnnx.Tests/Api`. Consumer CI keeps a
+job that builds against this repository's main (`git submodule update --remote`) so engine changes
+that break a consumer show before it bumps.
+
+Revisit when a third party wants to run its own models on the engine: narrow the surface to
+`OnnxModel` / `CompiledModel` / `InferenceSession` plus the operator set, ship 1.0, and have consumers
+use a version range instead of an exact pin.

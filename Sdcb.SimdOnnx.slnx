@@ -4,7 +4,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Sdcb.SimdOnnx.Tests/Sdcb.SimdOnnx.Tests.csproj" />
-    <Project Path="tests/Sdcb.SimdOnnx.PublicApiTests/Sdcb.SimdOnnx.PublicApiTests.csproj" />
   </Folder>
   <Folder Name="/bench/">
     <Project Path="bench/Sdcb.SimdOnnx.Bench/Sdcb.SimdOnnx.Bench.csproj" />

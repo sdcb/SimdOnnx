@@ -15,7 +15,7 @@ namespace Sdcb.SimdOnnx.Backends.Vulkan;
 /// (within <see cref="ArenaBudget"/>) and re-records its command buffer when the size or format
 /// changes. Not thread-safe: one run at a time; pool sessions for concurrency. Preview API.
 /// </remarks>
-public sealed unsafe class VkImageSession : IDisposable
+internal sealed unsafe class VkImageSession : IDisposable
 {
     private readonly VkBackend _be;
     private readonly VkDevice _dev;

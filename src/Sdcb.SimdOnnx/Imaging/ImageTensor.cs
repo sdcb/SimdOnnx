@@ -5,7 +5,7 @@ using Sdcb.SimdOnnx.Imaging.Kernels;
 namespace Sdcb.SimdOnnx.Imaging;
 
 /// <summary>Interleaved 8-bit source / destination pixel layout.</summary>
-public enum PixelFormat
+internal enum PixelFormat
 {
     /// <summary>3 bytes, B,G,R (OpenCV / GDI+ 24bpp).</summary>
     Bgr24 = 0,
@@ -18,7 +18,7 @@ public enum PixelFormat
 }
 
 /// <summary>Memory order of a 3-channel image tensor.</summary>
-public enum TensorLayout
+internal enum TensorLayout
 {
     /// <summary>[3][h][w] planes.</summary>
     Nchw = 0,
@@ -27,7 +27,7 @@ public enum TensorLayout
 }
 
 /// <summary>Order of the three tensor channels.</summary>
-public enum ChannelOrder
+internal enum ChannelOrder
 {
     /// <summary>Channel 0 = blue (OpenCV-trained models, PaddleOCR).</summary>
     Bgr = 0,
@@ -39,7 +39,7 @@ public enum ChannelOrder
 /// The per-channel byte → float map of a preprocessing recipe as a 3 x 256 table, so any formula
 /// (and its exact floating-point rounding) costs one lookup per element. Immutable and shareable.
 /// </summary>
-public sealed class PixelNormalization
+internal sealed class PixelNormalization
 {
     private PixelNormalization(float[] table, ChannelOrder order)
     {
@@ -56,8 +56,8 @@ public sealed class PixelNormalization
     /// <summary>The float a byte <paramref name="value"/> becomes in tensor channel <paramref name="channel"/>.</summary>
     public float Map(int channel, int value) => Table[checked(channel * 256 + value)];
 
-    /// <summary>Table from any per-channel function of the byte value (<paramref name="channel"/> is
-    /// the tensor channel, in <paramref name="order"/>).</summary>
+    /// <summary>Table from any per-channel function of the byte value (its first argument is
+    /// the tensor channel, in <paramref name="order"/>; the second the byte value).</summary>
     public static PixelNormalization FromFunction(Func<int, int, float> map, ChannelOrder order = ChannelOrder.Bgr)
     {
         if (map is null) throw new ArgumentNullException(nameof(map));
@@ -86,7 +86,7 @@ public sealed class PixelNormalization
 /// <see cref="PixelFormat"/> to NCHW / NHWC floats (optionally resized with OpenCV's exact 8-bit
 /// INTER_LINEAR arithmetic, or replicate-padded), and tensors back to pixels.
 /// </summary>
-public static unsafe class ImageTensor
+internal static unsafe class ImageTensor
 {
     /// <summary>Bytes per pixel of <paramref name="format"/>.</summary>
     public static int BytesPerPixel(PixelFormat format) => format switch

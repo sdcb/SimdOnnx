@@ -15,8 +15,9 @@ the same or lower peak memory and the same or better accuracy** than its old eng
    (git-ignored): `paddle-main` = SimdPaddleOCR `origin/main`, `gcdr-main` = Sdcb.GcdrNet `2b8fdfe`
    (last main before the SimdOnnx switch). Never junction / symlink anything into a worktree and
    then `git worktree remove --force` it: git follows the link and deletes its target.
-3. **New side** builds against the engine source: `-p:UseLocalSimdOnnx=true` on both consumers, so
-   the result reflects SimdOnnx `main`, not the pinned package.
+3. **New side** builds against this checkout: `-p:SimdOnnxRoot=<path to Sdcb.SimdOnnx>\` on both
+   consumers (by default they compile their `external/SimdOnnx` submodule), so the result reflects
+   SimdOnnx `main`, not the commit the consumer pins.
 4. **Data**: Paddle `dataset/` (git-ignored, 100 fixed synthetic images):
    `dotnet run --project test/Sdcb.SimdPaddleOCR.TestData -c Release -- --out dataset`; GcdrNet
    corpus: `tools/fetch-fixture.ps1`.
@@ -61,7 +62,7 @@ the same or lower peak memory and the same or better accuracy** than its old eng
   `bench/Sdcb.SimdGcdrNet.AndroidBench/run.ps1`. Both need the Android SDK, a JDK 21 and the
   `android` workload (`-Adb` / `-AndroidSdk` / `-Jdk` or `ADB` / `ANDROID_HOME` / `JAVA_HOME`).
 - Old and new APKs share a package id: build both once (old from the baseline worktree, new from the
-  feature branch with `-p:UseLocalSimdOnnx=true`), keep the two signed APKs, and alternate
+  feature branch with `-p:SimdOnnxRoot=...`), keep the two signed APKs, and alternate
   `adb install -r` per round. Thermals dominate on a phone: 60 s+ cool-down, record the thermal
   status, discard rounds that throttled, compare last-50 medians as well as all-image medians.
 - In the Vulkan route the Adreno 750 is a `dot=True` device (no coopmat, subgroup 64): 1x1 convs take

@@ -26,7 +26,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// Concat axis, relayout perms), so generic kernels address purely by
 /// <see cref="CValue.PhysShape"/>.
 /// </summary>
-public sealed class LayoutPlanner
+internal sealed class LayoutPlanner
 {
     private readonly List<ExecNode> _nodes;                      // planned output, in order
     private readonly List<CValue> _values;

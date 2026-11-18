@@ -9,10 +9,12 @@ namespace Sdcb.SimdOnnx.Decoding;
 /// weights packed once into 16-column tiles (AVX-512 / AVX2 / NEON / WASM SIMD / Vector&lt;T&gt;).
 /// Immutable and thread-safe: share one instance across sessions.
 /// </summary>
-public sealed class CtcProjection
+internal sealed class CtcProjection
 {
     /// <param name="weights">Row-major [inner, columns] (an ONNX MatMul's B).</param>
     /// <param name="bias">Per-class bias ([columns]) or null.</param>
+    /// <param name="inner">rows of <paramref name="weights"/> (the projected feature size).</param>
+    /// <param name="columns">columns of <paramref name="weights"/> (the class count).</param>
     public CtcProjection(float[] weights, float[]? bias, int inner, int columns)
     {
         if (inner <= 0 || columns <= 0) throw new ArgumentOutOfRangeException(nameof(inner));

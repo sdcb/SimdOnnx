@@ -4,7 +4,7 @@ namespace Sdcb.SimdOnnx.Imaging;
 
 /// <summary>Where the padding of a GPU image session goes when the image is rounded up to
 /// <see cref="ImageSessionOptions.PadMultiple"/>.</summary>
-public enum ImagePadding
+internal enum ImagePadding
 {
     /// <summary>The image sits at the bottom right; the rows above and columns left of it repeat its edge.</summary>
     TopLeft,
@@ -16,7 +16,7 @@ public enum ImagePadding
 /// How a GPU image session (Vulkan <c>VkImageSession</c>, Metal <c>MtlImageSession</c>) turns pixels into
 /// the model's [1, 3, H, W] input and its [1, 3, H, W] output back into pixels. Preview API.
 /// </summary>
-public sealed record ImageSessionOptions
+internal sealed record ImageSessionOptions
 {
     /// <summary>Byte → float map of the input, and the tensor channel order of input and output
     /// (default: <see cref="PixelNormalization.Unit"/>, B,G,R in [0, 1]).</summary>

@@ -15,7 +15,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// A backend that does not implement the op must not be targeted by the fusing pass
 /// (<see cref="PassContext.Target"/>): the core never falls back node by node.
 /// </summary>
-public abstract class ExtOp
+internal abstract class ExtOp
 {
     public abstract string Name { get; }
 
@@ -52,7 +52,7 @@ public abstract class ExtOp
 }
 
 /// <summary>When a <see cref="GraphPass"/> runs.</summary>
-public enum PassStage
+internal enum PassStage
 {
     /// <summary>Logical graph, after the built-in fusions, before layout planning.</summary>
     Logical,
@@ -61,14 +61,14 @@ public enum PassStage
 }
 
 /// <summary>A consumer-defined rewrite over the exec node list.</summary>
-public abstract class GraphPass
+internal abstract class GraphPass
 {
     public abstract PassStage Stage { get; }
     public abstract void Run(PassContext ctx);
 }
 
 /// <summary>Registered extension operators and passes; pass via <see cref="CompileOptions.Extensions"/>.</summary>
-public sealed class EngineExtensions
+internal sealed class EngineExtensions
 {
     private readonly List<GraphPass> _passes = [];
     public IReadOnlyList<GraphPass> Passes => _passes;
@@ -77,7 +77,7 @@ public sealed class EngineExtensions
 }
 
 /// <summary>Graph view handed to <see cref="GraphPass.Run"/>.</summary>
-public sealed class PassContext(List<ExecNode> nodes, List<CValue> values, int outputValue, CompileOptions options)
+internal sealed class PassContext(List<ExecNode> nodes, List<CValue> values, int outputValue, CompileOptions options)
 {
     public List<ExecNode> Nodes { get; } = nodes;
     public List<CValue> Values { get; } = values;
@@ -122,7 +122,7 @@ public sealed class PassContext(List<ExecNode> nodes, List<CValue> values, int o
 /// How a const tensor is laid out on a GPU (decided by its consumer). Built-ins cover the core
 /// shaders; extensions create their own with a <see cref="Pack"/> function. Identity is by reference.
 /// </summary>
-public sealed class ConstKind(string name, bool fp32, Func<CValue, float[]>? pack = null, Func<CValue, long>? elems = null)
+internal sealed class ConstKind(string name, bool fp32, Func<CValue, float[]>? pack = null, Func<CValue, long>? elems = null)
 {
     /// <summary>Core packings write straight into the upload buffer (no packed copy per const).</summary>
     internal ConstKind(string name, GpuPack.Packer into, Func<CValue, long>? elems = null)

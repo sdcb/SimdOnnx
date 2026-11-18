@@ -17,8 +17,9 @@ public class FusionTests
     [Theory]
     [InlineData(PlanTarget.Cpu)]
     [InlineData(PlanTarget.Vulkan)]
-    public void GcdrNet_FusionsFire_AndToggleOff(PlanTarget target)
+    public void GcdrNet_FusionsFire_AndToggleOff(object targetArg)
     {
+        var target = (PlanTarget)targetArg;
         foreach (var (path, c) in new[] { (EngineTests.GcPath, 3), (EngineTests.DrPath, 6) })
         {
             OnnxModel m = OnnxModel.Load(path);
@@ -207,8 +208,9 @@ public class FusionTests
     [SkippableTheory]
     [InlineData(PlanTarget.Cpu)]
     [InlineData(PlanTarget.Vulkan)]
-    public void PaddleOcr_PlansUnchangedByBuiltInFusions(PlanTarget target)
+    public void PaddleOcr_PlansUnchangedByBuiltInFusions(object targetArg)
     {
+        var target = (PlanTarget)targetArg;
         string? dir = PaddleModelDir();
         Skip.If(dir is null, "SimdPaddleOCR models not found (set SIMDONNX_PADDLE_MODELS)");
         string[] files = Directory.GetFiles(dir!, "*.onnx");

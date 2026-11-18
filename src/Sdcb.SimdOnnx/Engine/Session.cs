@@ -8,7 +8,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// A reusable inference session over a compiled <see cref="ExecPlan"/>.
 /// Not thread-safe; create one per thread or serialize externally.
 /// </summary>
-public sealed unsafe class InferenceSession : IDisposable
+internal sealed unsafe class InferenceSession : IDisposable
 {
     private readonly ExecPlan _plan;
     // native so Dispose frees it deterministically: multi-GB LOH arenas of evicted

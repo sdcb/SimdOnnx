@@ -8,7 +8,7 @@ namespace Sdcb.SimdOnnx.Onnx;
 /// </summary>
 /// <remarks>Preview API. Every inlined model must use <see cref="Opset"/> (ONNX operator semantics
 /// depend on it); the glue nodes are read under it too.</remarks>
-public sealed class OnnxModelBuilder
+internal sealed class OnnxModelBuilder
 {
     private readonly OnnxGraphData _g = new();
     private readonly HashSet<string> _names = new(StringComparer.Ordinal);

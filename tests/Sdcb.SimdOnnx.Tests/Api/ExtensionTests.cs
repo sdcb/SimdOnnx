@@ -1,9 +1,8 @@
 using Sdcb.SimdOnnx.Backends.Vulkan;
 using Sdcb.SimdOnnx.Engine;
 using Sdcb.SimdOnnx.Onnx;
-using Sdcb.SimdOnnx.Tests;
 
-namespace Sdcb.SimdOnnx.PublicApiTests;
+namespace Sdcb.SimdOnnx.Tests.Api;
 
 /// <summary>
 /// A third-party extension written against the public surface only (this assembly has no

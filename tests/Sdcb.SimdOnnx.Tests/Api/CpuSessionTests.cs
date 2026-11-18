@@ -2,9 +2,8 @@ using Sdcb.SimdOnnx.Backends.Metal;
 using Sdcb.SimdOnnx.Backends.Vulkan;
 using Sdcb.SimdOnnx.Engine;
 using Sdcb.SimdOnnx.Onnx;
-using Sdcb.SimdOnnx.Tests;
 
-namespace Sdcb.SimdOnnx.PublicApiTests;
+namespace Sdcb.SimdOnnx.Tests.Api;
 
 /// <summary><see cref="CpuModel"/> / <see cref="CpuSession"/>, <see cref="ModelHeads"/>, <see cref="EngineProfiler"/>
 /// and GPU device info, used the way a consumer would (public surface only).</summary>

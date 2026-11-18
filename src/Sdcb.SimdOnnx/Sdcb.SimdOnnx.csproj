@@ -1,35 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- Development build of the engine (tests, bench). Consumers do not reference this project: they
+       import Sdcb.SimdOnnx.Sources.props and compile the engine into their own assembly. -->
   <PropertyGroup>
     <TargetFramework></TargetFramework>
     <TargetFrameworks>net10.0;netstandard2.0</TargetFrameworks>
     <AssemblyName>Sdcb.SimdOnnx</AssemblyName>
     <RootNamespace>Sdcb.SimdOnnx</RootNamespace>
     <IsAotCompatible Condition="'$(TargetFramework)' == 'net10.0'">true</IsAotCompatible>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <!-- consumers that generate docs compile these comments too: keep them valid here -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
-  <!-- GPU backends (Vulkan / Metal) and their shaders are net10.0 only. -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
-    <!-- SPIR-V binaries are committed next to the .comp sources; regenerate with
-         Backends/Vulkan/tools/build-shaders.bat (glslc, dev-time only). -->
-    <EmbeddedResource Include="Backends\Vulkan\Shaders\*.spv" />
-    <EmbeddedResource Include="Backends\Metal\Shaders\*.metal" />
-    <Compile Remove="Compatibility/**/*.cs" />
-  </ItemGroup>
+  <Import Project="Sdcb.SimdOnnx.Sources.props" />
   <ItemGroup>
+    <Compile Include="Properties\AssemblyInfo.cs" />
     <None Remove="Backends\Vulkan\Shaders\*.comp" />
     <None Remove="Backends\Vulkan\Shaders\*.spv" />
-  </ItemGroup>
-  <!-- netstandard2.0: CPU only, Vector<T> / scalar kernel tiers. The hardware-intrinsic tiers still
-       compile against Compatibility/Intrinsics.cs (IsSupported = false stubs) and are never taken. -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
-    <Compile Remove="Backends/**/*.cs" />
-    <!-- decoding kernels: the ISA tiers are separate files (the Vector<T> / scalar ones stay) -->
-    <Compile Remove="Decoding/Kernels/*Avx*.cs;Decoding/Kernels/*AdvSimd.cs;Decoding/Kernels/*PackedSimd.cs" />
-    <PackageReference Include="Microsoft.Bcl.Numerics" Version="10.0.11" />
-    <PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
-    <PackageReference Include="System.Memory" Version="4.6.3" />
-    <PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />
-    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.1.2" />
-    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
-    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
   </ItemGroup>
 </Project>

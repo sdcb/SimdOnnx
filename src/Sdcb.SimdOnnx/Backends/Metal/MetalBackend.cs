@@ -8,7 +8,7 @@ namespace Sdcb.SimdOnnx.Backends.Metal;
 /// factories for inference sessions and fused enhancer pipelines. Thread-safe;
 /// dispose with the process or when the backend is torn down.
 /// </summary>
-public sealed class MetalBackend : IDisposable
+internal sealed class MetalBackend : IDisposable
 {
     internal readonly MtlDevice Dev;
     private readonly Dictionary<(OnnxModel m, string shape, CompileOptions opt), MtlGraphModel> _graphs = new();
@@ -92,7 +92,6 @@ public sealed class MetalBackend : IDisposable
     internal MtlGraphModel AcquireGraph(OnnxModel m, int[] shape, bool physIo, EngineExtensions? ext = null)
         => GraphFor(m, shape, physIo, ext);
 
-    /// <summary>Session over the graph for <paramref name="shape"/> under explicit plan options.</summary>
     /// <summary>The device's name.</summary>
     public string DeviceName => Dev.Name;
 

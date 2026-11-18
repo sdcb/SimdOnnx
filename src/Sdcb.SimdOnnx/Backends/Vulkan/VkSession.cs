@@ -60,7 +60,7 @@ internal sealed unsafe class VkSessionBuffers : IDisposable
 /// pre-recorded command buffer (staging copy-in → all dispatches → copy-out).
 /// Not thread-safe; one per thread or serialize externally.
 /// </summary>
-public sealed unsafe class VkInferenceSession : IDisposable
+internal sealed unsafe class VkInferenceSession : IDisposable
 {
     private readonly VkDevice _dev;
     private readonly VkGraphModel _graph;

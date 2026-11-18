@@ -16,8 +16,9 @@ public class ImageTensorTests
     [InlineData(PixelFormat.Rgb24)]
     [InlineData(PixelFormat.Bgra32)]
     [InlineData(PixelFormat.Rgba32)]
-    public void ResizeLinear_MatchesReference(PixelFormat format)
+    public void ResizeLinear_MatchesReference(object formatArg)
     {
+        var format = (PixelFormat)formatArg;
         var rng = new Random((int)format + 1);
         int bpp = ImageTensor.BytesPerPixel(format);
         var norm = PixelNormalization.MeanStd([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]);
@@ -60,8 +61,10 @@ public class ImageTensorTests
     [InlineData(PixelFormat.Rgba32, ChannelOrder.Bgr)]
     [InlineData(PixelFormat.Bgra32, ChannelOrder.Rgb)]
     [InlineData(PixelFormat.Rgb24, ChannelOrder.Rgb)]
-    public void FromPixels_ReplicatePads(PixelFormat format, ChannelOrder order)
+    public void FromPixels_ReplicatePads(object formatArg, object orderArg)
     {
+        var format = (PixelFormat)formatArg;
+        var order = (ChannelOrder)orderArg;
         var rng = new Random(5);
         int bpp = ImageTensor.BytesPerPixel(format), w = 37, h = 23, stride = w * bpp + 3;
         byte[] src = new byte[stride * h];
@@ -93,8 +96,9 @@ public class ImageTensorTests
     [InlineData(PixelFormat.Rgb24)]
     [InlineData(PixelFormat.Bgra32)]
     [InlineData(PixelFormat.Rgba32)]
-    public void ToPixels_RoundTripsAndCopiesAlpha(PixelFormat format)
+    public void ToPixels_RoundTripsAndCopiesAlpha(object formatArg)
     {
+        var format = (PixelFormat)formatArg;
         var rng = new Random(9);
         int bpp = ImageTensor.BytesPerPixel(format), w = 41, h = 19, stride = w * bpp + 5;
         byte[] src = new byte[stride * h];

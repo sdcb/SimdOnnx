@@ -5,7 +5,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// convolution class, summed over every session while <see cref="Enabled"/>. Also on with
 /// SIMDONNX_PROF=1. Costs two timestamps per node while enabled.
 /// </summary>
-public static class EngineProfiler
+internal static class EngineProfiler
 {
     /// <summary>Collect timings (process-wide).</summary>
     public static bool Enabled

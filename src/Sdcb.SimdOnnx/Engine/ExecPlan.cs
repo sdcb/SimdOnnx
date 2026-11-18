@@ -1,7 +1,7 @@
 namespace Sdcb.SimdOnnx.Engine;
 
 /// <summary>Executable op set — the lowered form the session runs.</summary>
-public enum ExecOp
+internal enum ExecOp
 {
     Conv,            // NCHW conv, optional bias + fused activation
     MaxPool,         // NCHW pooling
@@ -39,15 +39,15 @@ public enum ExecOp
     SpaceToDepth,    // NCHW [N, C, H*b, W*b] -> [N, C*b*b, H, W] (DepthToSpaceP: the inverse channel order)
 }
 
-public enum ActivationKind { None, Relu, Sigmoid, Gelu, HardSwish, Swish }
+internal enum ActivationKind { None, Relu, Sigmoid, Gelu, HardSwish, Swish }
 
-public enum PadMode { Constant, Reflect }
+internal enum PadMode { Constant, Reflect }
 
-public enum EwOp { Add, Sub, Mul, Div }
+internal enum EwOp { Add, Sub, Mul, Div }
 
 // ---- per-op parameter records (resolved at compile time) ----
 
-public sealed class ConvP
+internal sealed class ConvP
 {
     public required int[] Pads;      // [top, left, bottom, right] spatial only
     public required int[] Strides;   // [sh, sw]
@@ -64,7 +64,7 @@ public sealed class ConvP
     public PoolP? Pool;
 }
 
-public sealed class PoolP
+internal sealed class PoolP
 {
     public required int[] Kernel;
     public required int[] Strides;
@@ -73,18 +73,18 @@ public sealed class PoolP
     public bool CountIncludePad;     // AvgPool only
 }
 
-public sealed class EwP
+internal sealed class EwP
 {
     public required EwOp Op;
     public ActivationKind Act;
 }
 
-public sealed class LnP
+internal sealed class LnP
 {
     public float Eps;
 }
 
-public sealed class GemmP
+internal sealed class GemmP
 {
     public bool TransB;             // B stored [N,K] when true (onnx transB=1)
     public int BiasValue = -1;
@@ -92,7 +92,7 @@ public sealed class GemmP
     public object? KernelPlan;      // backend-private packed B, filled at session build
 }
 
-public sealed class ResizeP
+internal sealed class ResizeP
 {
     public required float[] Scales; // per-dim, only [.., sh, sw] used
     public bool FuseRelu;           // relu on the resized value (before the optional add)
@@ -100,12 +100,12 @@ public sealed class ResizeP
     public bool AddRelu;            // relu on the addend
 }
 
-public sealed class HardSigmoidP
+internal sealed class HardSigmoidP
 {
     public float Alpha, Beta;
 }
 
-public sealed class ConvTP
+internal sealed class ConvTP
 {
     public required int[] Kernel;    // [kh, kw] == strides
     public int BiasValue = -1;       // [oc] const (also folded from a trailing Add([1,oc,1,1] const))
@@ -113,30 +113,30 @@ public sealed class ConvTP
     public object? KernelPlan;
 }
 
-public sealed class ResizeNearestP
+internal sealed class ResizeNearestP
 {
     public required float[] Scales;
     // optional same-shape addend in In[1] (NHWC plans): out = resize(x) + [relu](In[1])
     public bool AddRelu;
 }
 
-public sealed class LeakyReluP
+internal sealed class LeakyReluP
 {
     public float Alpha = 0.01f;
 }
 
 /// <summary>OutScale · tanh(InScale · x) (scalar Muls around a Tanh fold in; null P = 1, 1).</summary>
-public sealed class TanhP
+internal sealed class TanhP
 {
     public float InScale = 1f, OutScale = 1f;
 }
 
-public sealed class ClipP
+internal sealed class ClipP
 {
     public float Min = float.NegativeInfinity, Max = float.PositiveInfinity;
 }
 
-public sealed class DepthToSpaceP
+internal sealed class DepthToSpaceP
 {
     public int Block;
     /// <summary>CRD: input channel c·b² + i·b + j feeds output (c, h·b + i, w·b + j); DCR: (i·b + j)·C + c.
@@ -148,7 +148,7 @@ public sealed class DepthToSpaceP
 /// Squeeze-excitation gate (In = [x, W1, W2]; W1 [R,C,1,1], W2 [C,R,1,1]):
 /// s[n,c] = gate(b2[c] + Σ_r W2[c,r]·act1(b1[r] + Σ_k W1[r,k]·mean_hw(x[n,k]))) + Offset, out [N,C,1,1].
 /// </summary>
-public sealed class ChannelGateP
+internal sealed class ChannelGateP
 {
     public int B1 = -1, B2 = -1;    // [R] / [C] bias value ids, -1 none
     public ActivationKind Act1;     // None / Relu
@@ -163,7 +163,7 @@ public sealed class ChannelGateP
 /// logical index Dims[i] = the axes holding (n, h, t|s, d) (-1: size 1), with axis FixAxis[i]
 /// (if >= 0) pinned to FixIndex[i]; any physical layout.
 /// </summary>
-public sealed class AttentionP
+internal sealed class AttentionP
 {
     public float Scale = 1f;
     public required int[][] Dims;
@@ -173,19 +173,19 @@ public sealed class AttentionP
     public int[]? OutLayout;
 }
 
-public sealed class PadP
+internal sealed class PadP
 {
     public required int[] Pads;     // [2*rank] begin..end
     public PadMode Mode = PadMode.Constant;
     public float Value;
 }
 
-public sealed class TransposeP
+internal sealed class TransposeP
 {
     public required int[] Perm;
 }
 
-public sealed class SliceP
+internal sealed class SliceP
 {
     public required int[] Starts;
     public required int[] Ends;
@@ -193,13 +193,13 @@ public sealed class SliceP
     public required int[] Steps;
 }
 
-public sealed class ConcatP
+internal sealed class ConcatP
 {
     public int Axis;
 }
 
 /// <summary>A resolved tensor value: compile-time constant or activation.</summary>
-public sealed class CValue
+internal sealed class CValue
 {
     public int[] Shape = [];
     public int DType;            // onnx dtype: 1 float, 7 int64
@@ -232,7 +232,7 @@ internal readonly unsafe struct FBuf
 }
 
 /// <summary>One executable step: op + value ids.</summary>
-public sealed class ExecNode
+internal sealed class ExecNode
 {
     public required ExecOp Op;
     public required int[] In;    // value ids
@@ -276,7 +276,7 @@ public sealed class ExecNode
 }
 
 /// <summary>Compiled graph ready for a session: exec nodes + buffer plan.</summary>
-public sealed class ExecPlan
+internal sealed class ExecPlan
 {
     public required ExecNode[] Nodes;
     public required CValue[] Values;
@@ -317,14 +317,21 @@ public sealed class ExecPlan
 }
 
 /// <summary>Backend a plan is compiled for (fusions are restricted to what it implements).</summary>
-public enum PlanTarget { Cpu, Vulkan, Metal }
+internal enum PlanTarget { Cpu, Vulkan, Metal }
 
 /// <summary>Plan compilation options.</summary>
+/// <param name="Nhwc">plan in NHWC (channels-last) layout.</param>
+/// <param name="PhysicalIo">graph input / output stay in the physical layout (no boundary transposes).</param>
 /// <param name="MemFuse">memory fusions (conv+pool and extension memory passes; NHWC only).</param>
 /// <param name="Target">backend the plan runs on.</param>
 /// <param name="Extensions">consumer-registered operators and graph passes.</param>
 /// <param name="OutputName">tensor to stop at instead of the graph output (nodes it does not need are dropped).</param>
-public sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool MemFuse = true,
+/// <param name="LogicalOutput">output in the logical (ONNX) layout even when the I/O is physical.</param>
+/// <param name="Fuse">structural fusions.</param>
+/// <param name="StagedCoopConv">shared-staged conv_cm for dense convs on SG16 (Intel Xe2) devices (see below).</param>
+/// <param name="Vec4Eltwise">GPU maxpool / bilinear / depthwise take 4 channels per invocation; null = the device default.</param>
+/// <param name="InputShapes">shapes of graph inputs after the first (null entries: the model's static dims).</param>
+internal sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool MemFuse = true,
     PlanTarget Target = PlanTarget.Cpu, EngineExtensions? Extensions = null, string? OutputName = null,
     bool LogicalOutput = false, bool Fuse = true, bool StagedCoopConv = false, bool? Vec4Eltwise = null,
     IReadOnlyList<int[]?>? InputShapes = null)

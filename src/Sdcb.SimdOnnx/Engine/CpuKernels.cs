@@ -10,7 +10,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// each layer once: entries are keyed by node identity and only reused when the
 /// weights (and bias) are element-for-element equal.
 /// </summary>
-public static class CpuKernels
+internal static class CpuKernels
 {
     /// <summary>Packed-weight cache shared by the per-shape CPU plans of one model.</summary>
     public sealed class Cache

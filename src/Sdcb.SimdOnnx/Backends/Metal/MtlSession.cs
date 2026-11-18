@@ -8,7 +8,7 @@ namespace Sdcb.SimdOnnx.Backends.Metal;
 /// into the arena, records the graph's dispatches into one command buffer and
 /// waits once — no staging copies (unified memory). Not thread-safe.
 /// </summary>
-public sealed unsafe class MtlInferenceSession : IDisposable
+internal sealed unsafe class MtlInferenceSession : IDisposable
 {
     private readonly MtlDevice _dev;
     private readonly MtlGraphModel _graph;

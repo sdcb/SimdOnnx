@@ -2,9 +2,8 @@ using Sdcb.SimdOnnx.Backends.Metal;
 using Sdcb.SimdOnnx.Backends.Vulkan;
 using Sdcb.SimdOnnx.Imaging;
 using Sdcb.SimdOnnx.Onnx;
-using Sdcb.SimdOnnx.Tests;
 
-namespace Sdcb.SimdOnnx.PublicApiTests;
+namespace Sdcb.SimdOnnx.Tests.Api;
 
 /// <summary><see cref="VkImageSession"/> / <see cref="MtlImageSession"/> against the CPU pixel path (<see cref="ImageTensor"/>).</summary>
 public class ImageSessionTests
@@ -37,8 +36,11 @@ public class ImageSessionTests
     [InlineData(PixelFormat.Rgb24, ChannelOrder.Bgr, ImagePadding.BottomRight, 8)]
     [InlineData(PixelFormat.Bgra32, ChannelOrder.Rgb, ImagePadding.TopLeft, 32)]
     [InlineData(PixelFormat.Rgba32, ChannelOrder.Rgb, ImagePadding.BottomRight, 1)]
-    public void Run_MatchesTheCpuPixelPath(PixelFormat format, ChannelOrder order, ImagePadding padding, int multiple)
+    public void Run_MatchesTheCpuPixelPath(object formatArg, object orderArg, object paddingArg, int multiple)
     {
+        var format = (PixelFormat)formatArg;
+        var order = (ChannelOrder)orderArg;
+        var padding = (ImagePadding)paddingArg;
         Skip.IfNot(VkBackend.TryGetDefault(out VkBackend? vk), "no Vulkan device");
         var o = new ImageSessionOptions { Normalization = PixelNormalization.Unit(order), Padding = padding, PadMultiple = multiple };
         using VkImageSession s = vk!.CreateImageSession(ScaleModel(), o);
@@ -51,8 +53,11 @@ public class ImageSessionTests
     [InlineData(PixelFormat.Rgb24, ChannelOrder.Bgr, ImagePadding.BottomRight, 8)]
     [InlineData(PixelFormat.Bgra32, ChannelOrder.Rgb, ImagePadding.TopLeft, 32)]
     [InlineData(PixelFormat.Rgba32, ChannelOrder.Rgb, ImagePadding.BottomRight, 1)]
-    public void Metal_Run_MatchesTheCpuPixelPath(PixelFormat format, ChannelOrder order, ImagePadding padding, int multiple)
+    public void Metal_Run_MatchesTheCpuPixelPath(object formatArg, object orderArg, object paddingArg, int multiple)
     {
+        var format = (PixelFormat)formatArg;
+        var order = (ChannelOrder)orderArg;
+        var padding = (ImagePadding)paddingArg;
         Skip.IfNot(MetalBackend.TryGetDefault(out MetalBackend? mb), "no Metal device");
         var o = new ImageSessionOptions { Normalization = PixelNormalization.Unit(order), Padding = padding, PadMultiple = multiple };
         using MtlImageSession s = mb!.CreateImageSession(ScaleModel(), o);

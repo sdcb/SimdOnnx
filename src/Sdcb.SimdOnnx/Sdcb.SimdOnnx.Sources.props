@@ -1,0 +1,48 @@
+<Project>
+  <!--
+    The engine as source. Consumers (SimdPaddleOCR, SimdGcdrNet) take this repo as a git submodule and
+    import this file from their library project, so the engine compiles into their own assembly with
+    every type internal: no Sdcb.SimdOnnx package, no version to pin, no conflict when an application
+    uses several consumers. Sdcb.SimdOnnx.csproj imports it too, so both builds use the same rules.
+
+    The importing project must target net10.0 and/or netstandard2.0 and allow unsafe blocks.
+  -->
+  <PropertyGroup>
+    <SimdOnnxSourceDir>$(MSBuildThisFileDirectory)</SimdOnnxSourceDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(SimdOnnxSourceDir)**\*.cs"
+             Exclude="$(SimdOnnxSourceDir)bin\**;$(SimdOnnxSourceDir)obj\**;$(SimdOnnxSourceDir)Properties\**"
+             Link="SimdOnnx\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- GPU backends (Vulkan / Metal) and their shaders are net10.0 only. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <Compile Remove="$(SimdOnnxSourceDir)Compatibility\**\*.cs" />
+    <!-- SPIR-V binaries are committed next to the .comp sources; regenerate with
+         Backends/Vulkan/tools/build-shaders.bat (glslc, dev-time only). Logical names are fixed so the
+         resources keep the same names whatever assembly they are embedded in. -->
+    <EmbeddedResource Include="$(SimdOnnxSourceDir)Backends\Vulkan\Shaders\*.spv"
+                      LogicalName="Sdcb.SimdOnnx.Backends.Vulkan.Shaders.%(Filename)%(Extension)"
+                      Link="SimdOnnx\Backends\Vulkan\Shaders\%(Filename)%(Extension)" />
+    <EmbeddedResource Include="$(SimdOnnxSourceDir)Backends\Metal\Shaders\*.metal"
+                      LogicalName="Sdcb.SimdOnnx.Backends.Metal.Shaders.%(Filename)%(Extension)"
+                      Link="SimdOnnx\Backends\Metal\Shaders\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- netstandard2.0: CPU only, Vector<T> / scalar kernel tiers. The hardware-intrinsic tiers still
+       compile against Compatibility/Intrinsics.cs (IsSupported = false stubs) and are never taken. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <Compile Remove="$(SimdOnnxSourceDir)Backends\**\*.cs" />
+    <!-- decoding kernels: the ISA tiers are separate files (the Vector<T> / scalar ones stay) -->
+    <Compile Remove="$(SimdOnnxSourceDir)Decoding\Kernels\*Avx*.cs;$(SimdOnnxSourceDir)Decoding\Kernels\*AdvSimd.cs;$(SimdOnnxSourceDir)Decoding\Kernels\*PackedSimd.cs" />
+    <PackageReference Include="Microsoft.Bcl.Numerics" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
+    <PackageReference Include="System.Memory" Version="4.6.3" />
+    <PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.1.2" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
+    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

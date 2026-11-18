@@ -9,7 +9,7 @@ namespace Sdcb.SimdOnnx.Backends;
 /// <param name="SubgroupSizeMax">Largest subgroup width.</param>
 /// <param name="UnifiedMemory">Device memory is system memory (integrated / mobile GPU).</param>
 /// <param name="DeviceLocalBytes">Size of the device-local heap.</param>
-public sealed record GpuDeviceInfo(
+internal sealed record GpuDeviceInfo(
     string Name,
     uint VendorId,
     bool Fp16Storage,

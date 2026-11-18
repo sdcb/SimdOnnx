@@ -7,9 +7,9 @@ using CK = Sdcb.SimdOnnx.Engine.ConstKind;
 namespace Sdcb.SimdOnnx.Backends.Metal;
 
 /// <summary>Binding slots resolved per-session: which underlying buffer.</summary>
-public enum MtlSlot : int { Arena = 0, Consts = 1, Dummy = 2, Direct = 3 }
+internal enum MtlSlot : int { Arena = 0, Consts = 1, Dummy = 2, Direct = 3 }
 
-public readonly struct MtlBind
+internal readonly struct MtlBind
 {
     public readonly MtlSlot Slot;
     internal readonly MtlBuffer? Buf;   // when Slot == Direct
@@ -19,7 +19,7 @@ public readonly struct MtlBind
 }
 
 /// <summary>One recorded compute dispatch.</summary>
-public sealed class MtlDispatch
+internal sealed class MtlDispatch
 {
     public required MtlPipeline Pipe;
     public required MtlBind[] Binds;
@@ -157,7 +157,7 @@ internal sealed class MtlConstStore
 /// buffers. Activations and packed weights are stored as fp16; all shader math
 /// is fp32; conv bias and LayerNorm params stay fp32.
 /// </summary>
-public sealed class MtlGraphModel : IDisposable
+internal sealed class MtlGraphModel : IDisposable
 {
     private readonly MtlDevice _dev;
     private readonly ExecPlan _plan;
@@ -174,6 +174,8 @@ public sealed class MtlGraphModel : IDisposable
     public int Es => 2;
 
 
+    /// <param name="dev">device the graph is built on.</param>
+    /// <param name="plan">compiled plan to lower.</param>
     /// <param name="constKey">Sharing key for the const store (the source model): graphs of the
     /// same model at other sizes reuse its uploaded weights. Null = private store.</param>
     internal MtlGraphModel(MtlDevice dev, ExecPlan plan, object? constKey = null)

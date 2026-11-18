@@ -7,13 +7,13 @@ namespace Sdcb.SimdOnnx.Decoding;
 /// <param name="Score">Score of the run's first frame (a max logit or a probability, as given).</param>
 /// <param name="Start">First frame of the run.</param>
 /// <param name="End">One past the run's last frame of this class (blank frames excluded); the frame count when it reaches the end.</param>
-public readonly record struct CtcToken(int Class, float Score, int Start, int End);
+internal readonly record struct CtcToken(int Class, float Score, int Start, int End);
 
 /// <summary>
 /// Greedy (best-path) CTC decoding: a label is emitted where the per-frame argmax is not the blank
 /// and differs from the previous frame's argmax (blank frames included), as PaddleOCR decodes.
 /// </summary>
-public static class CtcGreedyDecoder
+internal static class CtcGreedyDecoder
 {
     /// <summary>
     /// Collapses per-frame argmax <paramref name="indices"/> (with their <paramref name="scores"/>)

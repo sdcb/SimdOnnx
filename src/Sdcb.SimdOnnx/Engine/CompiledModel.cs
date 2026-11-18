@@ -7,7 +7,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// dynamic-shape plumbing folded, ops lowered to the exec set, buffers
 /// planned. Immutable; share across sessions freely.
 /// </summary>
-public sealed class CompiledModel
+internal sealed class CompiledModel
 {
     internal ExecPlan Plan { get; }
 

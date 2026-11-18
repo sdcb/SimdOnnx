@@ -1,7 +1,7 @@
 namespace Sdcb.SimdOnnx.Onnx;
 
 /// <summary>Validated ONNX model: graph nodes, initializers, IO metadata.</summary>
-public sealed class OnnxModel
+internal sealed class OnnxModel
 {
     private OnnxModel(int opset, OnnxGraphData graph, Dictionary<string, OnnxTensorData> initializers)
     {

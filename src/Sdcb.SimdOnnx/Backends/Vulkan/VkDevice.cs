@@ -8,7 +8,7 @@ namespace Sdcb.SimdOnnx.Backends.Vulkan;
 
 /// <summary>The device was lost (driver reset / GPU fault). Everything created on it is dead;
 /// <see cref="VkBackend.Default"/> creates a fresh device on its next use.</summary>
-public sealed class VkDeviceLostException(string what)
+internal sealed class VkDeviceLostException(string what)
     : InvalidOperationException($"Vulkan {what} failed: ErrorDeviceLost");
 
 internal unsafe sealed class VkDevice : IDisposable
@@ -920,7 +920,7 @@ internal unsafe sealed class VkDevice : IDisposable
     }
 }
 
-public sealed class VkPipeline
+internal sealed class VkPipeline
 {
     public IntPtr Pipeline, Layout, SetLayout;
     public string Name = "";

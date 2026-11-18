@@ -1,9 +1,8 @@
 using Sdcb.SimdOnnx.Backends.Vulkan;
 using Sdcb.SimdOnnx.Engine;
 using Sdcb.SimdOnnx.Onnx;
-using Sdcb.SimdOnnx.Tests;
 
-namespace Sdcb.SimdOnnx.PublicApiTests;
+namespace Sdcb.SimdOnnx.Tests.Api;
 
 /// <summary>Vulkan sessions on a shared <see cref="VkBufferPool"/>, async Submit / Wait, shape queries and
 /// <see cref="VkBatch"/> (public surface only). Skipped without a Vulkan device.</summary>

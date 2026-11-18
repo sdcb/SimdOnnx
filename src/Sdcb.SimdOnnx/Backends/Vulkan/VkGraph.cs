@@ -7,9 +7,9 @@ using CK = Sdcb.SimdOnnx.Engine.ConstKind;
 namespace Sdcb.SimdOnnx.Backends.Vulkan;
 
 /// <summary>Binding slots resolved per-session: which underlying buffer.</summary>
-public enum VkSlot : int { Arena = 0, Consts = 1, Dummy = 2, StageIn = 3, StageOut = 4, Direct = 5 }
+internal enum VkSlot : int { Arena = 0, Consts = 1, Dummy = 2, StageIn = 3, StageOut = 4, Direct = 5 }
 
-public readonly struct VkBind
+internal readonly struct VkBind
 {
     public readonly VkSlot Slot;
     internal readonly VkBuffer? Buf;   // when Slot == Direct
@@ -21,7 +21,7 @@ public readonly struct VkBind
 }
 
 /// <summary>One recorded compute dispatch.</summary>
-public sealed class VkDispatch
+internal sealed class VkDispatch
 {
     public required VkPipeline Pipe;
     public required VkBind[] Binds;
@@ -41,7 +41,7 @@ public sealed class VkDispatch
 /// shader math, reductions included, is fp32); conv bias and LayerNorm params
 /// stay fp32. Const bytes therefore differ per backend and per precision.
 /// </summary>
-public sealed class VkGraphModel : IDisposable
+internal sealed class VkGraphModel : IDisposable
 {
     private readonly VkDevice _dev;
     private readonly ExecPlan _plan;
@@ -64,6 +64,9 @@ public sealed class VkGraphModel : IDisposable
     private ulong _scratchBytes;
 
 
+    /// <param name="dev">device the graph is built on.</param>
+    /// <param name="plan">compiled plan to lower.</param>
+    /// <param name="f16">store activations as fp16.</param>
     /// <param name="constKey">Sharing key for the const store (the source model): graphs of the
     /// same model at other sizes reuse its uploaded weights. Null = private store.</param>
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]

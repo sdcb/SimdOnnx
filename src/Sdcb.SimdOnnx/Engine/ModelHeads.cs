@@ -8,7 +8,7 @@ namespace Sdcb.SimdOnnx.Engine;
 /// graph up to the logits or up to the layer's input (<see cref="CpuModel.WithOutput"/>) and compute
 /// the rest itself, e.g. a fused projection + argmax for CTC decoding.
 /// </summary>
-public sealed class SoftmaxHead
+internal sealed class SoftmaxHead
 {
     internal SoftmaxHead(string logitsName, LinearProjection? projection)
     {
@@ -24,7 +24,7 @@ public sealed class SoftmaxHead
 }
 
 /// <summary>logits = activation · Weights + Bias, with Weights stored row-major as [Inner, Columns].</summary>
-public sealed class LinearProjection
+internal sealed class LinearProjection
 {
     internal LinearProjection(string activationName, float[] weights, float[]? bias, int inner, int columns)
     {
@@ -47,7 +47,7 @@ public sealed class LinearProjection
 
 /// <summary>Finds model heads on the compiled plan, so they are seen after the compiler's rewrites
 /// (constant folding, fusions, alias views).</summary>
-public static class ModelHeads
+internal static class ModelHeads
 {
     /// <summary>The Softmax tail of <paramref name="model"/> compiled for <paramref name="probeShape"/>,
     /// or null when the graph output is not produced by a Softmax.</summary>

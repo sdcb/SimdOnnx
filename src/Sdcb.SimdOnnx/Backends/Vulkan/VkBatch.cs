@@ -10,7 +10,7 @@ namespace Sdcb.SimdOnnx.Backends.Vulkan;
 /// (<see cref="VkInferenceSession.IsStale"/>). Not thread-safe. Create with
 /// <see cref="VkBackend.CreateBufferPool"/>.
 /// </summary>
-public sealed class VkBufferPool : IDisposable
+internal sealed class VkBufferPool : IDisposable
 {
     internal VkBufferPool(VkBackend backend)
     {
@@ -33,7 +33,7 @@ public sealed class VkBufferPool : IDisposable
 /// <see cref="VkBackend.CreateBatch"/>; reuse across calls (<see cref="Clear"/>).
 /// </summary>
 /// <remarks>Preview API: the wave semantics may still change.</remarks>
-public sealed class VkBatch : IDisposable
+internal sealed class VkBatch : IDisposable
 {
     private readonly VkUnitRunner _runner;
 
