@@ -42,6 +42,45 @@ public class ImageTensorTests
         }
     }
 
+    [Theory]
+    [InlineData(PixelFormat.Bgr24)]
+    [InlineData(PixelFormat.Rgb24)]
+    [InlineData(PixelFormat.Bgra32)]
+    [InlineData(PixelFormat.Rgba32)]
+    public void ResizeLinearCrop_MatchesFullResizeThenCrop(object formatArg)
+    {
+        var format = (PixelFormat)formatArg;
+        var rng = new Random((int)format + 11);
+        int bpp = ImageTensor.BytesPerPixel(format);
+        var norm = PixelNormalization.MeanStd([0.485, 0.456, 0.406], [0.229, 0.224, 0.225], ChannelOrder.Rgb);
+        for (int it = 0; it < 25; it++)
+        {
+            int w = rng.Next(1, 300), h = rng.Next(1, 200), stride = w * bpp + rng.Next(0, 9);
+            byte[] src = new byte[stride * h];
+            rng.NextBytes(src);
+            int rw = rng.Next(1, 400), rh = rng.Next(1, 300);
+            int cw = rng.Next(1, rw + 1), ch = rng.Next(1, rh + 1);
+            int left = rng.Next(0, rw - cw + 1), top = rng.Next(0, rh - ch + 1);
+            float[] full = new float[3 * rw * rh];
+            ImageTensor.ResizeLinear(src, w, h, stride, format, rw, rh, full, TensorLayout.Nchw, norm);
+            foreach (TensorLayout layout in new[] { TensorLayout.Nchw, TensorLayout.Nhwc })
+                foreach (int threads in new[] { 1, 4 })
+                {
+                    float[] got = new float[3 * cw * ch];
+                    ImageTensor.ResizeLinearCrop(src, w, h, stride, format, rw, rh, left, top, cw, ch, got, layout, norm, threads);
+                    if (layout == TensorLayout.Nhwc) got = NhwcToNchw(got, ch, cw);
+                    for (int c = 0; c < 3; c++)
+                        for (int y = 0; y < ch; y++)
+                            for (int x = 0; x < cw; x++)
+                            {
+                                float want = full[(c * rh + y + top) * rw + x + left], have = got[(c * ch + y) * cw + x];
+                                if (want != have)
+                                    Assert.Fail($"{format} {w}x{h} -> {rw}x{rh} crop ({left},{top},{cw}x{ch}) {layout} t{threads}: c{c} ({x},{y}) {have} != {want}");
+                            }
+                }
+        }
+    }
+
     [Fact]
     public void ResizeLinear_IdentityKeepsBytes_RgbOrderSwaps()
     {

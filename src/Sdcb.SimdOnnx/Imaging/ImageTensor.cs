@@ -119,13 +119,44 @@ internal static unsafe class ImageTensor
         if (tensorWidth < resizedWidth) throw new ArgumentOutOfRangeException(nameof(tensorWidth));
         if (destination.Length < 3L * resizedHeight * tensorWidth) throw new ArgumentException("destination is too small.", nameof(destination));
         if (normalization is null) throw new ArgumentNullException(nameof(normalization));
+        ResizeCore(source, width, height, stride, format, resizedWidth, resizedHeight, 0, 0, resizedWidth, resizedHeight,
+            destination, layout, normalization, tensorWidth, threads);
+    }
 
-        int[] xOffsets = ArrayPool<int>.Shared.Rent(resizedWidth);
-        short[] xCoefficients = ArrayPool<short>.Shared.Rent(resizedWidth * 2);
+    /// <summary>
+    /// The <paramref name="cropWidth"/> x <paramref name="cropHeight"/> window at
+    /// (<paramref name="cropLeft"/>, <paramref name="cropTop"/>) of the image
+    /// <see cref="ResizeLinear"/> would produce at <paramref name="resizedWidth"/> x
+    /// <paramref name="resizedHeight"/>, bit-identical to resizing fully and then cropping, but only
+    /// the window is computed (a center crop of a very wide page stays 224 x 224 of work and memory).
+    /// The tensor is the window size.
+    /// </summary>
+    [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+    public static void ResizeLinearCrop(ReadOnlySpan<byte> source, int width, int height, int stride, PixelFormat format,
+        int resizedWidth, int resizedHeight, int cropLeft, int cropTop, int cropWidth, int cropHeight,
+        Span<float> destination, TensorLayout layout, PixelNormalization normalization, int threads = 1)
+    {
+        Validate(source, width, height, stride, format);
+        if (resizedWidth <= 0) throw new ArgumentOutOfRangeException(nameof(resizedWidth));
+        if (resizedHeight <= 0) throw new ArgumentOutOfRangeException(nameof(resizedHeight));
+        if (cropWidth <= 0 || cropLeft < 0 || cropLeft > resizedWidth - cropWidth) throw new ArgumentOutOfRangeException(nameof(cropWidth));
+        if (cropHeight <= 0 || cropTop < 0 || cropTop > resizedHeight - cropHeight) throw new ArgumentOutOfRangeException(nameof(cropHeight));
+        if (destination.Length < 3L * cropWidth * cropHeight) throw new ArgumentException("destination is too small.", nameof(destination));
+        if (normalization is null) throw new ArgumentNullException(nameof(normalization));
+        ResizeCore(source, width, height, stride, format, resizedWidth, resizedHeight, cropLeft, cropTop, cropWidth, cropHeight,
+            destination, layout, normalization, cropWidth, threads);
+    }
+
+    private static void ResizeCore(ReadOnlySpan<byte> source, int width, int height, int stride, PixelFormat format,
+        int resizedWidth, int resizedHeight, int cropLeft, int cropTop, int cropWidth, int cropHeight,
+        Span<float> destination, TensorLayout layout, PixelNormalization normalization, int tensorWidth, int threads)
+    {
+        int[] xOffsets = ArrayPool<int>.Shared.Rent(cropWidth);
+        short[] xCoefficients = ArrayPool<short>.Shared.Rent(cropWidth * 2);
         try
         {
-            LinearCoefficients(width, resizedWidth, xOffsets, xCoefficients);
-            int workers = Math.Max(1, Math.Min(threads, resizedHeight / MinRowsPerWorker));
+            LinearCoefficients(width, resizedWidth, xOffsets, xCoefficients, cropLeft, cropWidth);
+            int workers = Math.Max(1, Math.Min(threads, cropHeight / MinRowsPerWorker));
             fixed (byte* src = source)
             fixed (float* dst = destination)
             fixed (float* lut = normalization.Table)
@@ -133,7 +164,8 @@ internal static unsafe class ImageTensor
                 var job = new ResizeJob
                 {
                     Source = src, Stride = stride, Width = width, Height = height, Format = format,
-                    ResizedWidth = resizedWidth, ResizedHeight = resizedHeight, TensorWidth = tensorWidth,
+                    ResizedWidth = cropWidth, ResizedHeight = resizedHeight, Top = cropTop, RowCount = cropHeight,
+                    TensorWidth = tensorWidth,
                     Destination = dst, Lut = lut, Nhwc = layout == TensorLayout.Nhwc,
                     SwapOut = normalization.Order == ChannelOrder.Rgb, XOffsets = xOffsets, XCoefficients = xCoefficients,
                 };
@@ -159,7 +191,9 @@ internal static unsafe class ImageTensor
     private struct ResizeJob
     {
         public byte* Source;
-        public int Stride, Width, Height, ResizedWidth, ResizedHeight, TensorWidth;
+        // ResizedWidth: output columns (the crop width); ResizedHeight: full resized height, which
+        // fixes the vertical coordinates; output rows are [Top, Top + RowCount) of it
+        public int Stride, Width, Height, ResizedWidth, ResizedHeight, Top, RowCount, TensorWidth;
         public PixelFormat Format;
         public float* Destination, Lut;
         public bool Nhwc, SwapOut;
@@ -172,13 +206,13 @@ internal static unsafe class ImageTensor
             int[] row0 = ArrayPool<int>.Shared.Rent(ResizedWidth * 3), row1 = ArrayPool<int>.Shared.Rent(ResizedWidth * 3);
             try
             {
-                int plane = ResizedHeight * TensorWidth;
+                int plane = RowCount * TensorWidth;
                 // accumulators are B,G,R; tensor channel c reads accumulator c (BGR) or 2 - c (RGB)
                 int a0 = SwapOut ? 2 : 0, a2 = 2 - a0;
                 float* l0 = Lut, l1 = Lut + 256, l2 = Lut + 512;
-                for (int oy = first; oy < ResizedHeight; oy += step)
+                for (int oy = first; oy < RowCount; oy += step)
                 {
-                    LinearCoordinate(oy, Height, ResizedHeight, out int sy, out short beta0, out short beta1);
+                    LinearCoordinate(oy + Top, Height, ResizedHeight, out int sy, out short beta0, out short beta1);
                     int sy0 = Math.Min(Math.Max(sy, 0), Height - 1), sy1 = Math.Min(Math.Max(sy + 1, 0), Height - 1);
                     HorizontalRow(Source + (long)sy0 * Stride, Width, ResizedWidth, XOffsets, XCoefficients, row0, Format);
                     HorizontalRow(Source + (long)sy1 * Stride, Width, ResizedWidth, XOffsets, XCoefficients, row1, Format);
@@ -218,13 +252,15 @@ internal static unsafe class ImageTensor
         return v < 0 ? 0 : v > 255 ? 255 : v;
     }
 
-    private static void LinearCoefficients(int sourceSize, int destinationSize, int[] offsets, short[] coefficients)
+    // destination columns [start, start + count) of a destinationSize-wide resize, stored from index 0
+    private static void LinearCoefficients(int sourceSize, int destinationSize, int[] offsets, short[] coefficients,
+        int start, int count)
     {
         const int scale = 1 << 11;
-        for (int d = 0; d < destinationSize; d++)
+        for (int d = 0; d < count; d++)
         {
             // OpenCV computes the coordinate in softdouble: float can move a coefficient by one at ties
-            double coordinate = ((double)d + 0.5) * sourceSize / destinationSize - 0.5;
+            double coordinate = ((double)(d + start) + 0.5) * sourceSize / destinationSize - 0.5;
             int source = checked((int)Math.Floor(coordinate));
             double fraction = coordinate - source;
             if (source < 0) { source = 0; fraction = 0; }
