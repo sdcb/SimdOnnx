@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Wasm;
 using System.Threading.Tasks;
+using SimdMath = Sdcb.SimdOnnx.Kernels.SimdMath;
 
 namespace Sdcb.SimdOnnx.Decoding.Kernels;
 
@@ -136,14 +137,21 @@ internal static partial class MatMul
         int* indices, float* scores, int batch, int row,
         int rows, int inner, int columns)
     {
-        // Running per-row lane maxima / column indices, updated once per
-        // 8-column half in ascending column order (the Vector kernel's order).
-        Vector128<float>* state = stackalloc Vector128<float>[8];
+        // Running per-row lane maxima / column indices / softmax denominators,
+        // updated once per 8-column half in ascending column order (the
+        // Vector kernel's order).
+        Vector128<float>* state = stackalloc Vector128<float>[12];
         Vector128<float> negInf = Vector128.Create(float.NegativeInfinity);
-        for (int r = 0; r < 4; r++) { state[r] = negInf; state[4 + r] = Vector128<float>.Zero; }
+        for (int r = 0; r < 4; r++)
+        {
+            state[r] = negInf;
+            state[4 + r] = Vector128<float>.Zero;
+            state[8 + r] = Vector128<float>.Zero;
+        }
         float* p0 = input + (batch * rows + row) * inner;
         float* p1 = p0 + inner, p2 = p1 + inner, p3 = p2 + inner;
         Vector128<float> lanes = Vector128.Create(0f, 1f, 2f, 3f);
+        Vector128<float>* tileOut = stackalloc Vector128<float>[8];
         int col = 0;
         for (; col <= columns - 16; col += 16)
         {
@@ -174,30 +182,40 @@ internal static partial class MatMul
                     a0 = PackedSimd.Add(a0, bl); a1 = PackedSimd.Add(a1, bl); a2 = PackedSimd.Add(a2, bl); a3 = PackedSimd.Add(a3, bl);
                     b0 = PackedSimd.Add(b0, bh); b1 = PackedSimd.Add(b1, bh); b2 = PackedSimd.Add(b2, bh); b3 = PackedSimd.Add(b3, bh);
                 }
-                Vector128<float> low = PackedSimd.Add(PackedSimd.Splat((float)column), lanes);
-                Vector128<float> high = PackedSimd.Add(PackedSimd.Splat((float)(column + 4)), lanes);
-                UpdatePackedSimd(a0, low, state, 0);
-                UpdatePackedSimd(a1, low, state, 1);
-                UpdatePackedSimd(a2, low, state, 2);
-                UpdatePackedSimd(a3, low, state, 3);
-                UpdatePackedSimd(b0, high, state, 0);
-                UpdatePackedSimd(b1, high, state, 1);
-                UpdatePackedSimd(b2, high, state, 2);
-                UpdatePackedSimd(b3, high, state, 3);
+                tileOut[0] = a0; tileOut[1] = a1; tileOut[2] = a2; tileOut[3] = a3;
+                tileOut[4] = b0; tileOut[5] = b1; tileOut[6] = b2; tileOut[7] = b3;
+                UpdateHalfPackedSimd(tileOut, PackedSimd.Add(PackedSimd.Splat((float)column), lanes), state);
             }
         }
         Span<Vector<float>> vectorMaxima = stackalloc Vector<float>[4];
         Span<Vector<float>> vectorIndices = stackalloc Vector<float>[4];
+        Span<Vector<float>> vectorSums = stackalloc Vector<float>[4];
         for (int r = 0; r < 4; r++)
         {
             vectorMaxima[r] = state[r].AsVector();
             vectorIndices[r] = state[4 + r].AsVector();
+            vectorSums[r] = state[8 + r].AsVector();
         }
         float* maxima = stackalloc float[4];
         int* best = stackalloc int[4];
-        ReduceVector(vectorMaxima, vectorIndices, maxima, best);
+        float* sums = stackalloc float[4];
+        ReduceVector(vectorMaxima, vectorIndices, vectorSums, maxima, best, sums);
         FinishScalarTail(input, weights, bias, hasBias, indices, scores,
-            batch, row, 4, rows, inner, columns, col, maxima, best);
+            batch, row, 4, rows, inner, columns, col, maxima, best, sums);
+    }
+
+    // The per-tile epilogue (argmax + online softmax, an exp per logit) stays out of line: inlined
+    // into the MAC loop's method it costs the 5800X ~4x its arithmetic (AVX2: +65% instead of +15%
+    // on a 120 x 18385 head), while one call per register tile is noise next to inner MACs.
+    /// <summary>tile: rows 0-3 of columns [column, column + 4), then rows 0-3 of [column + 4, column + 8).</summary>
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplCompat.AggressiveOptimization)]
+    private static unsafe void UpdateHalfPackedSimd(Vector128<float>* tile, Vector128<float> low, Vector128<float>* state)
+    {
+        Vector128<float> high = PackedSimd.Add(low, Vector128.Create(4f));
+        for (int r = 0; r < 4; r++)
+            UpdatePackedSimd(tile[r], low, state, r);
+        for (int r = 0; r < 4; r++)
+            UpdatePackedSimd(tile[4 + r], high, state, r);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -206,6 +224,11 @@ internal static partial class MatMul
     {
         Vector128<float> previous = state[row];
         Vector128<float> replace = PackedSimd.CompareGreaterThan(values, previous);
+        // online softmax denominator, see UpdateArgMax
+        Vector128<float> e = SimdMath.ExpPk(PackedSimd.Negate(PackedSimd.Abs(PackedSimd.Subtract(values, previous))));
+        Vector128<float> s = state[8 + row];
+        state[8 + row] = PackedSimd.BitwiseSelect(PackedSimd.Add(PackedSimd.Multiply(s, e), Vector128<float>.One),
+            PackedSimd.Add(s, e), replace);
         state[row] = PackedSimd.Max(previous, values);
         state[4 + row] = PackedSimd.BitwiseSelect(candidate, state[4 + row], replace);
     }

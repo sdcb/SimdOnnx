@@ -67,8 +67,12 @@ internal static partial class MatMul
     {
         Span<Vector<float>> vectorMaxima = stackalloc Vector<float>[4];
         Span<Vector<float>> vectorIndices = stackalloc Vector<float>[4];
+        Span<Vector<float>> vectorSums = stackalloc Vector<float>[4];
+        vectorSums.Clear();
+        Span<Vector<float>> tileOut = stackalloc Vector<float>[16];
         float* maxima = stackalloc float[4];
         int* best = stackalloc int[4];
+        float* sums = stackalloc float[4];
         vectorMaxima[0] = vectorMaxima[1] = vectorMaxima[2] = vectorMaxima[3] =
             new Vector<float>(float.NegativeInfinity);
         int inputBase = (batch * rows + row) * inner;
@@ -212,26 +216,15 @@ internal static partial class MatMul
                     else { a03 += bv; a13 += bv; a23 += bv; a33 += bv; }
                 }
             }
-            UpdateVector(a00.AsVector(), col, 0, vectorMaxima, vectorIndices);
-            UpdateVector(a01.AsVector(), col + 4, 0, vectorMaxima, vectorIndices);
-            UpdateVector(a02.AsVector(), col + 8, 0, vectorMaxima, vectorIndices);
-            UpdateVector(a03.AsVector(), col + 12, 0, vectorMaxima, vectorIndices);
-            UpdateVector(a10.AsVector(), col, 1, vectorMaxima, vectorIndices);
-            UpdateVector(a11.AsVector(), col + 4, 1, vectorMaxima, vectorIndices);
-            UpdateVector(a12.AsVector(), col + 8, 1, vectorMaxima, vectorIndices);
-            UpdateVector(a13.AsVector(), col + 12, 1, vectorMaxima, vectorIndices);
-            UpdateVector(a20.AsVector(), col, 2, vectorMaxima, vectorIndices);
-            UpdateVector(a21.AsVector(), col + 4, 2, vectorMaxima, vectorIndices);
-            UpdateVector(a22.AsVector(), col + 8, 2, vectorMaxima, vectorIndices);
-            UpdateVector(a23.AsVector(), col + 12, 2, vectorMaxima, vectorIndices);
-            UpdateVector(a30.AsVector(), col, 3, vectorMaxima, vectorIndices);
-            UpdateVector(a31.AsVector(), col + 4, 3, vectorMaxima, vectorIndices);
-            UpdateVector(a32.AsVector(), col + 8, 3, vectorMaxima, vectorIndices);
-            UpdateVector(a33.AsVector(), col + 12, 3, vectorMaxima, vectorIndices);
+            tileOut[0] = a00.AsVector(); tileOut[1] = a01.AsVector(); tileOut[2] = a02.AsVector(); tileOut[3] = a03.AsVector();
+            tileOut[4] = a10.AsVector(); tileOut[5] = a11.AsVector(); tileOut[6] = a12.AsVector(); tileOut[7] = a13.AsVector();
+            tileOut[8] = a20.AsVector(); tileOut[9] = a21.AsVector(); tileOut[10] = a22.AsVector(); tileOut[11] = a23.AsVector();
+            tileOut[12] = a30.AsVector(); tileOut[13] = a31.AsVector(); tileOut[14] = a32.AsVector(); tileOut[15] = a33.AsVector();
+            UpdateTileVector(tileOut, 4, 4, col, vectorMaxima, vectorIndices, vectorSums);
         }
-        ReduceVector(vectorMaxima, vectorIndices, maxima, best);
+        ReduceVector(vectorMaxima, vectorIndices, vectorSums, maxima, best, sums);
         FinishScalarTail(input, weights, bias, hasBias, indices, scores,
-            batch, row, 4, rows, inner, columns, col, maxima, best);
+            batch, row, 4, rows, inner, columns, col, maxima, best, sums);
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
@@ -242,8 +235,12 @@ internal static partial class MatMul
     {
         Span<Vector<float>> vectorMaxima = stackalloc Vector<float>[1];
         Span<Vector<float>> vectorIndices = stackalloc Vector<float>[1];
+        Span<Vector<float>> vectorSums = stackalloc Vector<float>[1];
+        vectorSums.Clear();
+        Span<Vector<float>> tileOut = stackalloc Vector<float>[16];
         float* maxima = stackalloc float[1];
         int* best = stackalloc int[1];
+        float* sums = stackalloc float[1];
         vectorMaxima[0] = new Vector<float>(float.NegativeInfinity);
         int inputBase = (batch * rows + row) * inner;
         int col = 0;
@@ -308,14 +305,12 @@ internal static partial class MatMul
                 a2 += AdvSimd.LoadVector128(bias + col + 8);
                 a3 += AdvSimd.LoadVector128(bias + col + 12);
             }
-            UpdateVector(a0.AsVector(), col, 0, vectorMaxima, vectorIndices);
-            UpdateVector(a1.AsVector(), col + 4, 0, vectorMaxima, vectorIndices);
-            UpdateVector(a2.AsVector(), col + 8, 0, vectorMaxima, vectorIndices);
-            UpdateVector(a3.AsVector(), col + 12, 0, vectorMaxima, vectorIndices);
+            tileOut[0] = a0.AsVector(); tileOut[1] = a1.AsVector(); tileOut[2] = a2.AsVector(); tileOut[3] = a3.AsVector();
+            UpdateTileVector(tileOut, 4, 1, col, vectorMaxima, vectorIndices, vectorSums);
         }
-        ReduceVector(vectorMaxima, vectorIndices, maxima, best);
+        ReduceVector(vectorMaxima, vectorIndices, vectorSums, maxima, best, sums);
         FinishScalarTail(input, weights, bias, hasBias, indices, scores,
-            batch, row, 1, rows, inner, columns, col, maxima, best);
+            batch, row, 1, rows, inner, columns, col, maxima, best, sums);
     }
 #endif
 }

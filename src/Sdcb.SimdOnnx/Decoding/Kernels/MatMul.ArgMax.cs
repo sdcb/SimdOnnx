@@ -21,6 +21,11 @@ internal static partial class MatMul
         return inner >= 64 && columns >= 1024 && rows >= 1;
     }
 
+    /// <summary>
+    /// Fused projection + argmax + softmax: per row, <paramref name="indices"/> gets the largest
+    /// logit's column and <paramref name="scores"/> that column's softmax probability (see
+    /// <see cref="UpdateArgMax"/> for the online denominator every ISA tier keeps).
+    /// </summary>
     internal static bool TryArgMax(ReadOnlySpan<float> input,
         ReadOnlySpan<float> weights, ReadOnlySpan<float> bias,
         Span<int> indices, Span<float> scores, int batch, int rows,
@@ -158,6 +163,7 @@ internal static partial class MatMul
                 float m0 = float.NegativeInfinity, m1 = float.NegativeInfinity;
                 float m2 = float.NegativeInfinity, m3 = float.NegativeInfinity;
                 int i0 = 0, i1 = 0, i2 = 0, i3 = 0;
+                float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
                 int col = 0;
                 for (; col <= columns - 4; col += 4)
                 {
@@ -181,50 +187,50 @@ internal static partial class MatMul
                         a30 += v3 * w0; a31 += v3 * w1; a32 += v3 * w2; a33 += v3 * w3;
                         weightCursor += columns;
                     }
-                    UpdateArgMax(a00, col, ref m0, ref i0);
-                    UpdateArgMax(a01, col + 1, ref m0, ref i0);
-                    UpdateArgMax(a02, col + 2, ref m0, ref i0);
-                    UpdateArgMax(a03, col + 3, ref m0, ref i0);
-                    UpdateArgMax(a10, col, ref m1, ref i1);
-                    UpdateArgMax(a11, col + 1, ref m1, ref i1);
-                    UpdateArgMax(a12, col + 2, ref m1, ref i1);
-                    UpdateArgMax(a13, col + 3, ref m1, ref i1);
-                    UpdateArgMax(a20, col, ref m2, ref i2);
-                    UpdateArgMax(a21, col + 1, ref m2, ref i2);
-                    UpdateArgMax(a22, col + 2, ref m2, ref i2);
-                    UpdateArgMax(a23, col + 3, ref m2, ref i2);
-                    UpdateArgMax(a30, col, ref m3, ref i3);
-                    UpdateArgMax(a31, col + 1, ref m3, ref i3);
-                    UpdateArgMax(a32, col + 2, ref m3, ref i3);
-                    UpdateArgMax(a33, col + 3, ref m3, ref i3);
+                    UpdateArgMax(a00, col, ref m0, ref i0, ref s0);
+                    UpdateArgMax(a01, col + 1, ref m0, ref i0, ref s0);
+                    UpdateArgMax(a02, col + 2, ref m0, ref i0, ref s0);
+                    UpdateArgMax(a03, col + 3, ref m0, ref i0, ref s0);
+                    UpdateArgMax(a10, col, ref m1, ref i1, ref s1);
+                    UpdateArgMax(a11, col + 1, ref m1, ref i1, ref s1);
+                    UpdateArgMax(a12, col + 2, ref m1, ref i1, ref s1);
+                    UpdateArgMax(a13, col + 3, ref m1, ref i1, ref s1);
+                    UpdateArgMax(a20, col, ref m2, ref i2, ref s2);
+                    UpdateArgMax(a21, col + 1, ref m2, ref i2, ref s2);
+                    UpdateArgMax(a22, col + 2, ref m2, ref i2, ref s2);
+                    UpdateArgMax(a23, col + 3, ref m2, ref i2, ref s2);
+                    UpdateArgMax(a30, col, ref m3, ref i3, ref s3);
+                    UpdateArgMax(a31, col + 1, ref m3, ref i3, ref s3);
+                    UpdateArgMax(a32, col + 2, ref m3, ref i3, ref s3);
+                    UpdateArgMax(a33, col + 3, ref m3, ref i3, ref s3);
                 }
                 for (; col < columns; col++)
                 {
-                    float s0 = hasBias ? biasPtr[col] : 0, s1 = s0, s2 = s0, s3 = s0;
+                    float v0 = hasBias ? biasPtr[col] : 0, v1 = v0, v2 = v0, v3 = v0;
                     int inputBase = (b * rows + row) * inner;
                     for (int k = 0; k < inner; k++)
                     {
                         float w = weightsPtr[k * columns + col];
-                        s0 += inputPtr[inputBase + k] * w;
-                        s1 += inputPtr[inputBase + inner + k] * w;
-                        s2 += inputPtr[inputBase + inner * 2 + k] * w;
-                        s3 += inputPtr[inputBase + inner * 3 + k] * w;
+                        v0 += inputPtr[inputBase + k] * w;
+                        v1 += inputPtr[inputBase + inner + k] * w;
+                        v2 += inputPtr[inputBase + inner * 2 + k] * w;
+                        v3 += inputPtr[inputBase + inner * 3 + k] * w;
                     }
-                    UpdateArgMax(s0, col, ref m0, ref i0);
-                    UpdateArgMax(s1, col, ref m1, ref i1);
-                    UpdateArgMax(s2, col, ref m2, ref i2);
-                    UpdateArgMax(s3, col, ref m3, ref i3);
+                    UpdateArgMax(v0, col, ref m0, ref i0, ref s0);
+                    UpdateArgMax(v1, col, ref m1, ref i1, ref s1);
+                    UpdateArgMax(v2, col, ref m2, ref i2, ref s2);
+                    UpdateArgMax(v3, col, ref m3, ref i3, ref s3);
                 }
                 int outputRow = b * rows + row;
-                WriteArgMax(indicesPtr, scoresPtr, outputRow, i0, m0);
-                WriteArgMax(indicesPtr, scoresPtr, outputRow + 1, i1, m1);
-                WriteArgMax(indicesPtr, scoresPtr, outputRow + 2, i2, m2);
-                WriteArgMax(indicesPtr, scoresPtr, outputRow + 3, i3, m3);
+                WriteArgMax(indicesPtr, scoresPtr, outputRow, i0, s0);
+                WriteArgMax(indicesPtr, scoresPtr, outputRow + 1, i1, s1);
+                WriteArgMax(indicesPtr, scoresPtr, outputRow + 2, i2, s2);
+                WriteArgMax(indicesPtr, scoresPtr, outputRow + 3, i3, s3);
             }
 
             void Row1(int b, int row)
             {
-                float max = float.NegativeInfinity;
+                float max = float.NegativeInfinity, total = 0;
                 int best = 0;
                 int inputBase = (b * rows + row) * inner;
                 for (int col = 0; col < columns; col++)
@@ -232,9 +238,9 @@ internal static partial class MatMul
                     float sum = hasBias ? biasPtr[col] : 0;
                     for (int k = 0; k < inner; k++)
                         sum += inputPtr[inputBase + k] * weightsPtr[k * columns + col];
-                    UpdateArgMax(sum, col, ref max, ref best);
+                    UpdateArgMax(sum, col, ref max, ref best, ref total);
                 }
-                WriteArgMax(indicesPtr, scoresPtr, b * rows + row, best, max);
+                WriteArgMax(indicesPtr, scoresPtr, b * rows + row, best, total);
             }
 
             void Worker(int w)
@@ -252,50 +258,64 @@ internal static partial class MatMul
         }
     }
 
+    // Every kernel keeps, next to the running maximum m of the logits seen so far, the online
+    // softmax denominator s = sum(exp(x - m)) over them: a value x <= m adds exp(x - m); a new
+    // maximum x rescales s by exp(m - x) and adds exp(0) = 1. Both cases use e = exp(-|x - m|) <= 1,
+    // so nothing overflows, and m = -inf at the start gives e ~ 0 and s = 1. The winner's softmax
+    // probability is 1 / s: no [rows, columns] logits are stored and there is no second pass.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void UpdateArgMax(float value, int column, ref float max, ref int best)
+    private static void UpdateArgMax(float value, int column, ref float max, ref int best, ref float sum)
     {
         if (!float.IsFinite(value))
             throw new InvalidDataException("Recognizer output is invalid.");
         if (value > max)
         {
+            sum = sum * MathF.Exp(max - value) + 1f;
             max = value;
             best = column;
         }
+        else sum += MathF.Exp(value - max);
+    }
+
+    /// <summary>Adds one lane's (m_l, s_l) to a row denominator taken relative to the row maximum.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double MergeSoftmaxLane(double total, float laneMax, float laneSum, float maximum) =>
+        laneSum == 0 ? total : total + laneSum * Math.Exp((double)laneMax - maximum);
+
+    /// <summary>The winner's softmax probability 1 / s (s &gt;= 1: the winner itself adds exp(0)).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float SoftmaxProbability(float sum)
+    {
+        if (!(sum > 0) || float.IsInfinity(sum))
+            throw new InvalidDataException("Recognizer output is invalid.");
+        return Math.Min(1f, 1f / sum);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe void WriteArgMax(int* indices, float* scores, int row, int index, float score)
+    private static unsafe void WriteArgMax(int* indices, float* scores, int row, int index, float sum)
     {
         indices[row] = index;
-        scores[row] = score;
+        scores[row] = SoftmaxProbability(sum);
     }
 
     private static unsafe void FinishScalarTail(float* input, float* weights,
         float* bias, bool hasBias, int* indices, float* scores,
         int batch, int row, int blockRows, int rows, int inner, int columns,
-        int firstColumn, float* maxima, int* best)
+        int firstColumn, float* maxima, int* best, float* sums)
     {
         int inputBase = (batch * rows + row) * inner;
         for (int r = 0; r < blockRows; r++)
         {
+            float max = maxima[r], sum = sums[r];
+            int index = best[r];
             for (int column = firstColumn; column < columns; column++)
             {
                 float value = hasBias ? bias[column] : 0;
                 for (int k = 0; k < inner; k++)
                     value += input[inputBase + r * inner + k] * weights[k * columns + column];
-                if (!float.IsFinite(value))
-                    throw new InvalidDataException("Recognizer output is invalid.");
-                float oldMax = maxima[r];
-                if (value > oldMax)
-                {
-                    maxima[r] = value;
-                    best[r] = column;
-                }
+                UpdateArgMax(value, column, ref max, ref index, ref sum);
             }
-            int outputRow = batch * rows + row + r;
-            indices[outputRow] = best[r];
-            scores[outputRow] = maxima[r];
+            WriteArgMax(indices, scores, batch * rows + row + r, index, sum);
         }
     }
 }

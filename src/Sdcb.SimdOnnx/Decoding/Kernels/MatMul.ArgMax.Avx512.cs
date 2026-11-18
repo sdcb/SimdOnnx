@@ -94,6 +94,7 @@ internal static partial class MatMul
         int stateLen = workers * totalRows;
         Vector512<float>[] allMaxima = System.Buffers.ArrayPool<Vector512<float>>.Shared.Rent(stateLen);
         Vector512<float>[] allIndices = System.Buffers.ArrayPool<Vector512<float>>.Shared.Rent(stateLen);
+        Vector512<float>[] allSums = System.Buffers.ArrayPool<Vector512<float>>.Shared.Rent(stateLen);
         try
         {
             fixed (float* inputPin = input, weightsPin = weights,
@@ -107,47 +108,55 @@ internal static partial class MatMul
                     int tBeg = (int)((long)tiles * w / workers), tEnd = (int)((long)tiles * (w + 1) / workers);
                     Span<Vector512<float>> vm = allMaxima.AsSpan(w * totalRows, totalRows);
                     Span<Vector512<float>> vi = allIndices.AsSpan(w * totalRows, totalRows);
+                    Span<Vector512<float>> vs = allSums.AsSpan(w * totalRows, totalRows);
                     vm.Fill(Vector512.Create(float.NegativeInfinity));
                     vi.Clear();
+                    vs.Clear();
                     for (int t0 = tBeg; t0 < tEnd; t0 += blockTiles)
                     {
                         int t1 = Math.Min(tEnd, t0 + blockTiles);
                         int row = 0;
                         for (; row + 16 <= totalRows; row += 16)
                             ArgMaxTiles16Avx512(inputPtr, packedPtr, biasPtr, hasBias,
-                                row * inner, inner, t0, t1, vm.Slice(row, 16), vi.Slice(row, 16));
+                                row * inner, inner, t0, t1, vm.Slice(row, 16), vi.Slice(row, 16), vs.Slice(row, 16));
                         if (row + 8 <= totalRows)
                         {
                             ArgMaxTiles8Avx512(inputPtr, packedPtr, biasPtr, hasBias,
-                                row * inner, inner, t0, t1, vm.Slice(row, 8), vi.Slice(row, 8));
+                                row * inner, inner, t0, t1, vm.Slice(row, 8), vi.Slice(row, 8), vs.Slice(row, 8));
                             row += 8;
                         }
                         if (row < totalRows)
                             ArgMaxTiles4Avx512(inputPtr, packedPtr, biasPtr, hasBias,
-                                row * inner, inner, t0, t1, vm.Slice(row, 4), vi.Slice(row, 4));
+                                row * inner, inner, t0, t1, vm.Slice(row, 4), vi.Slice(row, 4), vs.Slice(row, 4));
                     }
                 }
                 Parallel.For(0, workers, Worker);
 
                 float* maxima = stackalloc float[1];
                 int* best = stackalloc int[1];
+                float* sums = stackalloc float[1];
                 Span<Vector512<float>> m1 = stackalloc Vector512<float>[1];
                 Span<Vector512<float>> i1 = stackalloc Vector512<float>[1];
+                Span<Vector512<float>> s1 = stackalloc Vector512<float>[1];
                 for (int row = 0; row < totalRows; row++)
                 {
-                    Vector512<float> m = allMaxima[row], ix = allIndices[row];
+                    Vector512<float> m = allMaxima[row], ix = allIndices[row], s = allSums[row];
                     for (int w = 1; w < workers; w++)
                     {
                         Vector512<float> v = allMaxima[w * totalRows + row];
                         Vector512<float> replace = Avx512F.Compare(v, m,
                             FloatComparisonMode.OrderedGreaterThanNonSignaling);
-                        m = Avx512F.Max(m, v);
+                        // every worker owns >= 1 tile, so every lane maximum is finite here
+                        Vector512<float> merged = Avx512F.Max(m, v);
+                        s = Avx512F.FusedMultiplyAdd(s, Exp512(Avx512F.Subtract(m, merged)),
+                            Avx512F.Multiply(allSums[w * totalRows + row], Exp512(Avx512F.Subtract(v, merged))));
+                        m = merged;
                         ix = Avx512F.BlendVariable(ix, allIndices[w * totalRows + row], replace);
                     }
-                    m1[0] = m; i1[0] = ix;
-                    Reduce512(m1, i1, maxima, best);
+                    m1[0] = m; i1[0] = ix; s1[0] = s;
+                    Reduce512(m1, i1, s1, maxima, best, sums);
                     FinishScalarTail(inputPin, weightsPin, biasPin, hasBias, indicesPin, scoresPin,
-                        0, row, 1, totalRows, inner, columns, tiles * 16, maxima, best);
+                        0, row, 1, totalRows, inner, columns, tiles * 16, maxima, best, sums);
                 }
             }
         }
@@ -155,6 +164,7 @@ internal static partial class MatMul
         {
             System.Buffers.ArrayPool<Vector512<float>>.Shared.Return(allMaxima);
             System.Buffers.ArrayPool<Vector512<float>>.Shared.Return(allIndices);
+            System.Buffers.ArrayPool<Vector512<float>>.Shared.Return(allSums);
         }
         return true;
     }
@@ -163,8 +173,10 @@ internal static partial class MatMul
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void ArgMaxTiles16Avx512(float* input, float* packed, float* bias,
         bool hasBias, int inputBase, int inner, int t0, int t1,
-        Span<Vector512<float>> vectorMaxima, Span<Vector512<float>> vectorIndices)
+        Span<Vector512<float>> vectorMaxima, Span<Vector512<float>> vectorIndices,
+        Span<Vector512<float>> vectorSums)
     {
+        Vector512<float>* tileOut = stackalloc Vector512<float>[16];
         for (int t = t0; t < t1; t++)
         {
             int col = t * 16;
@@ -205,30 +217,21 @@ internal static partial class MatMul
                 a12 = Avx512F.Add(a12, bv); a13 = Avx512F.Add(a13, bv);
                 a14 = Avx512F.Add(a14, bv); a15 = Avx512F.Add(a15, bv);
             }
-            Update512(a0, col, 0, vectorMaxima, vectorIndices);
-            Update512(a1, col, 1, vectorMaxima, vectorIndices);
-            Update512(a2, col, 2, vectorMaxima, vectorIndices);
-            Update512(a3, col, 3, vectorMaxima, vectorIndices);
-            Update512(a4, col, 4, vectorMaxima, vectorIndices);
-            Update512(a5, col, 5, vectorMaxima, vectorIndices);
-            Update512(a6, col, 6, vectorMaxima, vectorIndices);
-            Update512(a7, col, 7, vectorMaxima, vectorIndices);
-            Update512(a8, col, 8, vectorMaxima, vectorIndices);
-            Update512(a9, col, 9, vectorMaxima, vectorIndices);
-            Update512(a10, col, 10, vectorMaxima, vectorIndices);
-            Update512(a11, col, 11, vectorMaxima, vectorIndices);
-            Update512(a12, col, 12, vectorMaxima, vectorIndices);
-            Update512(a13, col, 13, vectorMaxima, vectorIndices);
-            Update512(a14, col, 14, vectorMaxima, vectorIndices);
-            Update512(a15, col, 15, vectorMaxima, vectorIndices);
+            tileOut[0] = a0; tileOut[1] = a1; tileOut[2] = a2; tileOut[3] = a3;
+            tileOut[4] = a4; tileOut[5] = a5; tileOut[6] = a6; tileOut[7] = a7;
+            tileOut[8] = a8; tileOut[9] = a9; tileOut[10] = a10; tileOut[11] = a11;
+            tileOut[12] = a12; tileOut[13] = a13; tileOut[14] = a14; tileOut[15] = a15;
+            UpdateTile512(tileOut, 16, col, vectorMaxima, vectorIndices, vectorSums);
         }
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void ArgMaxTiles8Avx512(float* input, float* packed, float* bias,
         bool hasBias, int inputBase, int inner, int t0, int t1,
-        Span<Vector512<float>> vectorMaxima, Span<Vector512<float>> vectorIndices)
+        Span<Vector512<float>> vectorMaxima, Span<Vector512<float>> vectorIndices,
+        Span<Vector512<float>> vectorSums)
     {
+        Vector512<float>* tileOut = stackalloc Vector512<float>[16];
         for (int t = t0; t < t1; t++)
         {
             int col = t * 16;
@@ -255,22 +258,19 @@ internal static partial class MatMul
                 a4 = Avx512F.Add(a4, bv); a5 = Avx512F.Add(a5, bv);
                 a6 = Avx512F.Add(a6, bv); a7 = Avx512F.Add(a7, bv);
             }
-            Update512(a0, col, 0, vectorMaxima, vectorIndices);
-            Update512(a1, col, 1, vectorMaxima, vectorIndices);
-            Update512(a2, col, 2, vectorMaxima, vectorIndices);
-            Update512(a3, col, 3, vectorMaxima, vectorIndices);
-            Update512(a4, col, 4, vectorMaxima, vectorIndices);
-            Update512(a5, col, 5, vectorMaxima, vectorIndices);
-            Update512(a6, col, 6, vectorMaxima, vectorIndices);
-            Update512(a7, col, 7, vectorMaxima, vectorIndices);
+            tileOut[0] = a0; tileOut[1] = a1; tileOut[2] = a2; tileOut[3] = a3;
+            tileOut[4] = a4; tileOut[5] = a5; tileOut[6] = a6; tileOut[7] = a7;
+            UpdateTile512(tileOut, 8, col, vectorMaxima, vectorIndices, vectorSums);
         }
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void ArgMaxTiles4Avx512(float* input, float* packed, float* bias,
         bool hasBias, int inputBase, int inner, int t0, int t1,
-        Span<Vector512<float>> vectorMaxima, Span<Vector512<float>> vectorIndices)
+        Span<Vector512<float>> vectorMaxima, Span<Vector512<float>> vectorIndices,
+        Span<Vector512<float>> vectorSums)
     {
+        Vector512<float>* tileOut = stackalloc Vector512<float>[16];
         for (int t = t0; t < t1; t++)
         {
             int col = t * 16;
@@ -290,10 +290,8 @@ internal static partial class MatMul
                 a0 = Avx512F.Add(a0, bv); a1 = Avx512F.Add(a1, bv);
                 a2 = Avx512F.Add(a2, bv); a3 = Avx512F.Add(a3, bv);
             }
-            Update512(a0, col, 0, vectorMaxima, vectorIndices);
-            Update512(a1, col, 1, vectorMaxima, vectorIndices);
-            Update512(a2, col, 2, vectorMaxima, vectorIndices);
-            Update512(a3, col, 3, vectorMaxima, vectorIndices);
+            tileOut[0] = a0; tileOut[1] = a1; tileOut[2] = a2; tileOut[3] = a3;
+            UpdateTile512(tileOut, 4, col, vectorMaxima, vectorIndices, vectorSums);
         }
     }
 
@@ -305,6 +303,9 @@ internal static partial class MatMul
     {
         Span<Vector512<float>> vectorMaxima = stackalloc Vector512<float>[16];
         Span<Vector512<float>> vectorIndices = stackalloc Vector512<float>[16];
+        Span<Vector512<float>> vectorSums = stackalloc Vector512<float>[16];
+        vectorSums.Clear();
+        Vector512<float>* tileOut = stackalloc Vector512<float>[16];
         vectorMaxima.Fill(Vector512.Create(float.NegativeInfinity));
         int inputBase = (batch * rows + row) * inner;
         int col = 0;
@@ -347,28 +348,18 @@ internal static partial class MatMul
                 a12 = Avx512F.Add(a12, bv); a13 = Avx512F.Add(a13, bv);
                 a14 = Avx512F.Add(a14, bv); a15 = Avx512F.Add(a15, bv);
             }
-            Update512(a0, col, 0, vectorMaxima, vectorIndices);
-            Update512(a1, col, 1, vectorMaxima, vectorIndices);
-            Update512(a2, col, 2, vectorMaxima, vectorIndices);
-            Update512(a3, col, 3, vectorMaxima, vectorIndices);
-            Update512(a4, col, 4, vectorMaxima, vectorIndices);
-            Update512(a5, col, 5, vectorMaxima, vectorIndices);
-            Update512(a6, col, 6, vectorMaxima, vectorIndices);
-            Update512(a7, col, 7, vectorMaxima, vectorIndices);
-            Update512(a8, col, 8, vectorMaxima, vectorIndices);
-            Update512(a9, col, 9, vectorMaxima, vectorIndices);
-            Update512(a10, col, 10, vectorMaxima, vectorIndices);
-            Update512(a11, col, 11, vectorMaxima, vectorIndices);
-            Update512(a12, col, 12, vectorMaxima, vectorIndices);
-            Update512(a13, col, 13, vectorMaxima, vectorIndices);
-            Update512(a14, col, 14, vectorMaxima, vectorIndices);
-            Update512(a15, col, 15, vectorMaxima, vectorIndices);
+            tileOut[0] = a0; tileOut[1] = a1; tileOut[2] = a2; tileOut[3] = a3;
+            tileOut[4] = a4; tileOut[5] = a5; tileOut[6] = a6; tileOut[7] = a7;
+            tileOut[8] = a8; tileOut[9] = a9; tileOut[10] = a10; tileOut[11] = a11;
+            tileOut[12] = a12; tileOut[13] = a13; tileOut[14] = a14; tileOut[15] = a15;
+            UpdateTile512(tileOut, 16, col, vectorMaxima, vectorIndices, vectorSums);
         }
         float* maxima = stackalloc float[16];
         int* best = stackalloc int[16];
-        Reduce512(vectorMaxima, vectorIndices, maxima, best);
+        float* sums = stackalloc float[16];
+        Reduce512(vectorMaxima, vectorIndices, vectorSums, maxima, best, sums);
         FinishScalarTail(input, weights, bias, hasBias, indices, scores,
-            batch, row, 16, rows, inner, columns, col, maxima, best);
+            batch, row, 16, rows, inner, columns, col, maxima, best, sums);
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
@@ -379,6 +370,9 @@ internal static partial class MatMul
     {
         Span<Vector512<float>> vectorMaxima = stackalloc Vector512<float>[8];
         Span<Vector512<float>> vectorIndices = stackalloc Vector512<float>[8];
+        Span<Vector512<float>> vectorSums = stackalloc Vector512<float>[8];
+        vectorSums.Clear();
+        Vector512<float>* tileOut = stackalloc Vector512<float>[16];
         vectorMaxima.Fill(Vector512.Create(float.NegativeInfinity));
         int inputBase = (batch * rows + row) * inner;
         int col = 0;
@@ -407,36 +401,70 @@ internal static partial class MatMul
                 a4 = Avx512F.Add(a4, bv); a5 = Avx512F.Add(a5, bv);
                 a6 = Avx512F.Add(a6, bv); a7 = Avx512F.Add(a7, bv);
             }
-            Update512(a0, col, 0, vectorMaxima, vectorIndices);
-            Update512(a1, col, 1, vectorMaxima, vectorIndices);
-            Update512(a2, col, 2, vectorMaxima, vectorIndices);
-            Update512(a3, col, 3, vectorMaxima, vectorIndices);
-            Update512(a4, col, 4, vectorMaxima, vectorIndices);
-            Update512(a5, col, 5, vectorMaxima, vectorIndices);
-            Update512(a6, col, 6, vectorMaxima, vectorIndices);
-            Update512(a7, col, 7, vectorMaxima, vectorIndices);
+            tileOut[0] = a0; tileOut[1] = a1; tileOut[2] = a2; tileOut[3] = a3;
+            tileOut[4] = a4; tileOut[5] = a5; tileOut[6] = a6; tileOut[7] = a7;
+            UpdateTile512(tileOut, 8, col, vectorMaxima, vectorIndices, vectorSums);
         }
         float* maxima = stackalloc float[8];
         int* best = stackalloc int[8];
-        Reduce512(vectorMaxima, vectorIndices, maxima, best);
+        float* sums = stackalloc float[8];
+        Reduce512(vectorMaxima, vectorIndices, vectorSums, maxima, best, sums);
         FinishScalarTail(input, weights, bias, hasBias, indices, scores,
-            batch, row, 8, rows, inner, columns, col, maxima, best);
+            batch, row, 8, rows, inner, columns, col, maxima, best, sums);
+    }
+
+    // The per-tile epilogue (argmax + online softmax, an exp per logit) stays out of line: inlined
+    // into the MAC loop's method it costs the 5800X ~4x its arithmetic (AVX2: +65% instead of +15%
+    // on a 120 x 18385 head), while one call per register tile is noise next to inner MACs.
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplCompat.AggressiveOptimization)]
+    private static unsafe void UpdateTile512(Vector512<float>* tile, int rowCount, int col,
+        Span<Vector512<float>> maxima, Span<Vector512<float>> indices, Span<Vector512<float>> sums)
+    {
+        for (int r = 0; r < rowCount; r++)
+            Update512(tile[r], col, r, maxima, indices, sums);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Update512(Vector512<float> values, int column, int row,
-        Span<Vector512<float>> maxima, Span<Vector512<float>> indices)
+        Span<Vector512<float>> maxima, Span<Vector512<float>> indices, Span<Vector512<float>> sums)
     {
         Vector512<float> previous = maxima[row];
         Vector512<float> replace = Avx512F.Compare(values, previous,
             FloatComparisonMode.OrderedGreaterThanNonSignaling);
+        // online softmax denominator, see UpdateArgMax: e = exp(-|values - previous|)
+        Vector512<float> e = Exp512(Vector512.BitwiseOr(Avx512F.Subtract(values, previous), Vector512.Create(-0f)));
+        Vector512<float> s = sums[row];
+        sums[row] = Avx512F.BlendVariable(Avx512F.Add(s, e),
+            Avx512F.FusedMultiplyAdd(s, e, Vector512<float>.One), replace);
         maxima[row] = Avx512F.Max(previous, values);
         Vector512<float> candidate = Avx512F.Add(Vector512.Create((float)column), ArgMaxLanes512);
         indices[row] = Avx512F.BlendVariable(indices[row], candidate, replace);
     }
 
+    /// <summary>exp(x) for the online softmax (x &lt;= 0 there): SimdMath.ExpCore's cephes polynomial on 16 lanes.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<float> Exp512(Vector512<float> x)
+    {
+        x = Avx512F.Max(x, Vector512.Create(-87.3f));
+        x = Avx512F.Min(x, Vector512.Create(88.7f));
+        Vector512<float> fx = Avx512F.FusedMultiplyAdd(x, Vector512.Create(1.4426950408889634f), Vector512.Create(0.5f));
+        Vector512<float> nf = Vector512.Floor(fx);
+        Vector512<float> r = Avx512F.FusedMultiplyAdd(nf, Vector512.Create(-0.693359375f), x);
+        r = Avx512F.FusedMultiplyAdd(nf, Vector512.Create(0.00021219444005469058f), r);
+        Vector512<float> p = Vector512.Create(1.9875691500e-4f);
+        p = Avx512F.FusedMultiplyAdd(p, r, Vector512.Create(1.3981999507e-3f));
+        p = Avx512F.FusedMultiplyAdd(p, r, Vector512.Create(8.3334519073e-3f));
+        p = Avx512F.FusedMultiplyAdd(p, r, Vector512.Create(4.1665795894e-2f));
+        p = Avx512F.FusedMultiplyAdd(p, r, Vector512.Create(1.6666665459e-1f));
+        p = Avx512F.FusedMultiplyAdd(p, r, Vector512.Create(5.0000001201e-1f));
+        Vector512<float> y = Avx512F.Add(Avx512F.FusedMultiplyAdd(p, Avx512F.Multiply(r, r), r), Vector512<float>.One);
+        Vector512<int> n = Avx512F.Add(Avx512F.ConvertToVector512Int32(nf), Vector512.Create(127));
+        return Avx512F.Multiply(y, Avx512F.ShiftLeftLogical(n, 23).AsSingle());
+    }
+
     private static unsafe void Reduce512(ReadOnlySpan<Vector512<float>> vectorMaxima,
-        ReadOnlySpan<Vector512<float>> vectorIndices, float* maxima, int* best)
+        ReadOnlySpan<Vector512<float>> vectorIndices, ReadOnlySpan<Vector512<float>> vectorSums,
+        float* maxima, int* best, float* sums)
     {
         for (int row = 0; row < vectorMaxima.Length; row++)
         {
@@ -456,8 +484,13 @@ internal static partial class MatMul
             }
             if (!float.IsFinite(maximum))
                 throw new InvalidDataException("Recognizer output is invalid.");
+            Vector512<float> laneSums = vectorSums[row];
+            double total = 0;
+            for (int lane = 0; lane < 16; lane++)
+                total = MergeSoftmaxLane(total, values.GetElement(lane), laneSums.GetElement(lane), maximum);
             maxima[row] = maximum;
             best[row] = index;
+            sums[row] = (float)total;
         }
     }
 }

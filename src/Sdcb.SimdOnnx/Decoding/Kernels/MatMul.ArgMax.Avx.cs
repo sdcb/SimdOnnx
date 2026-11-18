@@ -6,6 +6,7 @@ using System.Runtime.Intrinsics.X86;
 using System.Threading.Tasks;
 
 using static Sdcb.SimdOnnx.Decoding.Kernels.SimdOps;
+using SimdMath = Sdcb.SimdOnnx.Kernels.SimdMath;
 
 namespace Sdcb.SimdOnnx.Decoding.Kernels;
 
@@ -49,7 +50,7 @@ internal static partial class MatMul
                 int stateLength = checked(myJobs * 4);
                 // Two <=4KB workspaces stay on the stack; larger states follow
                 // the existing pool/discard policy. Initialize both before use.
-                Vector256<float>[]? rentedMaxima = null, rentedIndices = null;
+                Vector256<float>[]? rentedMaxima = null, rentedIndices = null, rentedSums = null;
                 try
                 {
                     Span<Vector256<float>> allMaxima = stateLength <= 128
@@ -58,10 +59,16 @@ internal static partial class MatMul
                     Span<Vector256<float>> allIndices = stateLength <= 128
                         ? stackalloc Vector256<float>[stateLength]
                         : (rentedIndices = PooledArrays.Rent<Vector256<float>>(stateLength)).AsSpan(0, stateLength);
+                    Span<Vector256<float>> allSums = stateLength <= 128
+                        ? stackalloc Vector256<float>[stateLength]
+                        : (rentedSums = PooledArrays.Rent<Vector256<float>>(stateLength)).AsSpan(0, stateLength);
                     allMaxima.Fill(Vector256.Create(float.NegativeInfinity));
                     allIndices.Clear();
+                    allSums.Clear();
                     float* maxima = stackalloc float[4];
                     int* best = stackalloc int[4];
+                    float* sums = stackalloc float[4];
+                    Vector256<float>* tileOut = stackalloc Vector256<float>[8];
                     for (int t0 = 0; t0 < tiles; t0 += blockTiles)
                     {
                         int t1 = Math.Min(tiles, t0 + blockTiles);
@@ -71,6 +78,7 @@ internal static partial class MatMul
                             int b = job / rowJobs, row = (job - b * rowJobs) * 4;
                             Span<Vector256<float>> vectorMaxima = allMaxima.Slice(j * 4, 4);
                             Span<Vector256<float>> vectorIndices = allIndices.Slice(j * 4, 4);
+                            Span<Vector256<float>> vectorSums = allSums.Slice(j * 4, 4);
                             int inputBase = (b * rows + row) * inner;
                             for (int t = t0; t < t1; t++)
                             {
@@ -102,14 +110,8 @@ internal static partial class MatMul
                                     a2l = Avx.Add(a2l, bl); a2h = Avx.Add(a2h, bh);
                                     a3l = Avx.Add(a3l, bl); a3h = Avx.Add(a3h, bh);
                                 }
-                                Update256(a0l, col, 0, vectorMaxima, vectorIndices);
-                                Update256(a0h, col + 8, 0, vectorMaxima, vectorIndices);
-                                Update256(a1l, col, 1, vectorMaxima, vectorIndices);
-                                Update256(a1h, col + 8, 1, vectorMaxima, vectorIndices);
-                                Update256(a2l, col, 2, vectorMaxima, vectorIndices);
-                                Update256(a2h, col + 8, 2, vectorMaxima, vectorIndices);
-                                Update256(a3l, col, 3, vectorMaxima, vectorIndices);
-                                Update256(a3h, col + 8, 3, vectorMaxima, vectorIndices);
+                                tileOut[0] = a0l; tileOut[1] = a0h; tileOut[2] = a1l; tileOut[3] = a1h; tileOut[4] = a2l; tileOut[5] = a2h; tileOut[6] = a3l; tileOut[7] = a3h;
+                                UpdateTile256(tileOut, col, vectorMaxima, vectorIndices, vectorSums);
                             }
                         }
                     }
@@ -117,16 +119,18 @@ internal static partial class MatMul
                     {
                         int job = w + j * workers;
                         int b = job / rowJobs, row = (job - b * rowJobs) * 4;
-                        Reduce256(allMaxima.Slice(j * 4, 4), allIndices.Slice(j * 4, 4), maxima, best);
+                        Reduce256(allMaxima.Slice(j * 4, 4), allIndices.Slice(j * 4, 4), allSums.Slice(j * 4, 4),
+                            maxima, best, sums);
                         FinishScalarTail(inputPtr, weightsPtr, biasPtr, hasBias,
                             indicesPtr, scoresPtr, b, row, 4, rows, inner, columns, tiles * 16,
-                            maxima, best);
+                            maxima, best, sums);
                     }
                 }
                 finally
                 {
                     PooledArrays.Return(rentedMaxima);
                     PooledArrays.Return(rentedIndices);
+                    PooledArrays.Return(rentedSums);
                 }
             }
 
@@ -135,20 +139,40 @@ internal static partial class MatMul
         }
     }
 
+    // The per-tile epilogue (argmax + online softmax, an exp per logit) stays out of line: inlined
+    // into the MAC loop's method it costs the 5800X ~4x its arithmetic (AVX2: +65% instead of +15%
+    // on a 120 x 18385 head), while one call per register tile is noise next to inner MACs.
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplCompat.AggressiveOptimization)]
+    private static unsafe void UpdateTile256(Vector256<float>* tile, int col,
+        Span<Vector256<float>> maxima, Span<Vector256<float>> indices, Span<Vector256<float>> sums)
+    {
+        // tile: [row][low 8, high 8] of a four-row block
+        for (int r = 0; r < 4; r++)
+        {
+            Update256(tile[2 * r], col, r, maxima, indices, sums);
+            Update256(tile[2 * r + 1], col + 8, r, maxima, indices, sums);
+        }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Update256(Vector256<float> values, int column, int row,
-        Span<Vector256<float>> maxima, Span<Vector256<float>> indices)
+        Span<Vector256<float>> maxima, Span<Vector256<float>> indices, Span<Vector256<float>> sums)
     {
         Vector256<float> previous = maxima[row];
         Vector256<float> replace = Avx.Compare(values, previous,
             FloatComparisonMode.OrderedGreaterThanNonSignaling);
+        // online softmax denominator, see UpdateArgMax: e = exp(-|values - previous|)
+        Vector256<float> e = SimdMath.ExpCore(Avx.Or(Avx.Subtract(values, previous), Vector256.Create(-0f)));
+        Vector256<float> s = sums[row];
+        sums[row] = Avx.BlendVariable(Avx.Add(s, e), AddMul(Vector256<float>.One, s, e), replace);
         maxima[row] = Avx.Max(previous, values);
         Vector256<float> candidate = Avx.Add(Vector256.Create((float)column), ArgMaxLanes256);
         indices[row] = Avx.BlendVariable(indices[row], candidate, replace);
     }
 
     private static unsafe void Reduce256(ReadOnlySpan<Vector256<float>> vectorMaxima,
-        ReadOnlySpan<Vector256<float>> vectorIndices, float* maxima, int* best)
+        ReadOnlySpan<Vector256<float>> vectorIndices, ReadOnlySpan<Vector256<float>> vectorSums,
+        float* maxima, int* best, float* sums)
     {
         for (int row = 0; row < vectorMaxima.Length; row++)
         {
@@ -168,8 +192,13 @@ internal static partial class MatMul
             }
             if (!float.IsFinite(maximum))
                 throw new InvalidDataException("Recognizer output is invalid.");
+            Vector256<float> laneSums = vectorSums[row];
+            double total = 0;
+            for (int lane = 0; lane < 8; lane++)
+                total = MergeSoftmaxLane(total, values.GetElement(lane), laneSums.GetElement(lane), maximum);
             maxima[row] = maximum;
             best[row] = index;
+            sums[row] = (float)total;
         }
     }
 }

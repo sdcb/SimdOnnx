@@ -4,8 +4,8 @@ namespace Sdcb.SimdOnnx.Decoding;
 
 /// <summary>
 /// The class projection of a CTC head (features [rows, inner] x W [inner, columns] + bias) fused
-/// with the per-row argmax, so the [rows, columns] logits (columns can be thousands of classes) are
-/// never stored. Wide heads (inner &gt;= 64, columns &gt;= 1024) run register-blocked SIMD kernels over
+/// with the per-row argmax and softmax, so the [rows, columns] logits (columns can be thousands of
+/// classes) are never stored. Wide heads (inner &gt;= 64, columns &gt;= 1024) run register-blocked SIMD kernels over
 /// weights packed once into 16-column tiles (AVX-512 / AVX2 / NEON / WASM SIMD / Vector&lt;T&gt;).
 /// Immutable and thread-safe: share one instance across sessions.
 /// </summary>
@@ -43,13 +43,15 @@ internal sealed class CtcProjection
 
     /// <summary>
     /// Per row of <paramref name="features"/> ([batch * rows, inner]): the index of the largest logit
-    /// and that logit (ties keep the first index). Throws on non-finite logits.
+    /// (ties keep the first index) and that class's softmax probability over the row, in (0, 1]. The
+    /// softmax denominator is accumulated online next to the running maximum, in the same pass as the
+    /// argmax. Throws on non-finite logits.
     /// </summary>
     /// <returns>False when the head is not <see cref="IsFused"/> (nothing written).</returns>
-    public bool ArgMax(ReadOnlySpan<float> features, int batch, int rows, Span<int> indices, Span<float> maxLogits, int threads = 1)
+    public bool ArgMax(ReadOnlySpan<float> features, int batch, int rows, Span<int> indices, Span<float> probabilities, int threads = 1)
     {
         if (features.Length != (long)batch * rows * Inner) throw new ArgumentException("features must hold batch x rows x inner floats.", nameof(features));
-        return MatMul.TryArgMax(features, Weights, Bias ?? [], indices, maxLogits, batch, rows, Inner, Columns, Packed, threads);
+        return MatMul.TryArgMax(features, Weights, Bias ?? [], indices, probabilities, batch, rows, Inner, Columns, Packed, threads);
     }
 
     /// <summary>
@@ -58,10 +60,10 @@ internal sealed class CtcProjection
     /// row's arithmetic is that of its standalone call.
     /// </summary>
     public bool ArgMaxUnits(ReadOnlySpan<float> features, ReadOnlySpan<int> batches, ReadOnlySpan<int> rows,
-        Span<int> indices, Span<float> maxLogits, int threads = 1)
+        Span<int> indices, Span<float> probabilities, int threads = 1)
     {
         if (batches.Length != rows.Length) throw new ArgumentException("batches and rows differ in length.", nameof(rows));
-        return MatMul.TryArgMaxUnits(features, Weights, Bias ?? [], indices, maxLogits, batches, rows, Inner, Columns, Packed, threads);
+        return MatMul.TryArgMaxUnits(features, Weights, Bias ?? [], indices, probabilities, batches, rows, Inner, Columns, Packed, threads);
     }
 
     private static float[]? Pack(float[] w, int inner, int columns)

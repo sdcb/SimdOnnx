@@ -15,7 +15,7 @@ internal static class SimdMath
 {
     // ---------- exp(x): cephes-style 2^n * poly(r) ----------
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector<float> Exp(Vector<float> x)
+    internal static Vector<float> Exp(Vector<float> x)
     {
         int VL = Vector<float>.Count;
         // clamp to avoid overflow in scale
